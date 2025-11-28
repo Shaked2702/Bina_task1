@@ -589,13 +589,13 @@ class WateringProblem(search.Problem):
 
         plant_unit_costs.sort()  # ascending
 
-        # Loaded units: compute optimistic robot->plant distances for each loaded unit
+        # Loaded units: compute optimistic robot->plant distances per robot (one entry per robot with load)
+        # Counting once per robot is admissible (robots can pour multiple units at the same plant).
         loaded_dists = []
         for (_, rr, rc, rload, _) in robots_tuple:
             robot_pos = (rr, rc)
             if rload <= 0:
                 continue
-            # distance to closest plant (any plant needing water)
             pdmap_min = float('inf')
             for ppos in plants.keys():
                 pdmap = self.dist_from_plant.get(ppos)
@@ -606,22 +606,20 @@ class WateringProblem(search.Problem):
                     pdmap_min = d
             if pdmap_min == float('inf'):
                 continue
-            loaded_dists.extend([pdmap_min] * int(rload))
+            loaded_dists.append(pdmap_min)
 
         loaded_dists.sort()
 
-        loaded_used = min(len(loaded_dists), total_needed)
-        # Assign loaded units optimistically to the most expensive plant-unit deliveries
-        # Remove largest plant_unit_costs entries as they can be satisfied by loaded units
-        remaining_units = total_needed
-        if loaded_used > 0:
-            # remove largest loaded_used elements from plant_unit_costs
-            plant_unit_costs = plant_unit_costs[:max(0, len(plant_unit_costs) - loaded_used)]
-            remaining_units = total_needed - loaded_used
+        # We can use at most one loaded robot assignment per robot (admissible),
+        # and they reduce the number of remaining units by up to the sum of robot loads.
+        total_loaded_units = sum(r[3] for r in robots_tuple)
+        loaded_used_units = min(total_loaded_units, total_needed)
+        # conservative movement estimate for loaded robots: sum of minimal distances for each robot that has any load
+        movement_loaded = sum(loaded_dists)
+        # remaining units after using existing loaded water
+        remaining_units = max(0, total_needed - total_loaded_units)
 
-        movement_loaded = sum(loaded_dists[:loaded_used]) if loaded_used > 0 else 0
-
-        # For remaining units, each requires robot->tap + tap->plant
+        # For remaining units, plan optimistic number of trips considering robot capacities
         # robot->tap distance: optimistic min over robots for their distance to nearest tap
         robot_to_tap_min = float('inf')
         for (_, rr, rc, _, _) in robots_tuple:
@@ -633,9 +631,11 @@ class WateringProblem(search.Problem):
         if robot_to_tap_min == float('inf'):
             return 10 ** 9
 
-        # Sum the smallest remaining_units plant unit costs (optimistic assignment)
-        plant_cost_for_unloaded = sum(plant_unit_costs[:remaining_units]) if remaining_units > 0 else 0
-        movement_unloaded = remaining_units * robot_to_tap_min + plant_cost_for_unloaded
+        # trips needed (each trip can carry up to max_robot_cap units)
+        trips = int(math.ceil(remaining_units / float(self.max_robot_cap))) if remaining_units > 0 else 0
+        # minimal tap->plant distance per trip (optimistic): take the smallest plant unit cost
+        plant_min_cost = min(plant_unit_costs) if plant_unit_costs else 0
+        movement_unloaded = trips * (robot_to_tap_min + plant_min_cost)
 
         movement_lb = movement_loaded + movement_unloaded
 
