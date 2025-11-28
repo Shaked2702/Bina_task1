@@ -10,7 +10,10 @@ try:
 
     def _instrumented_astar(problem, h=None):
         start = time.time()
-        result = _orig_astar(problem, h)
+        if USE_MACRO:
+            result = macro_astar(problem, h)
+        else:
+            result = _orig_astar(problem, h)
         end = time.time()
         # result may be (node, expanded) or node; graph_search returns (node, expanded)
         expanded = None
@@ -57,6 +60,269 @@ try:
     search.greedy_best_first_graph_search = _instrumented_gbfs
 except Exception:
     pass
+
+# Toggle: enable macro planner when True (branch: macro-planner)
+USE_MACRO = True
+
+
+class MacroProblem(search.Problem):
+    """Wrapper Problem that exposes macro actions (move directly to taps/plants,
+    and bulk LOAD/POUR) while keeping the same underlying state representation.
+    Actions are returned as tuples: (atype, cost, details) so `path_cost` can
+    use the provided cost. The `macro_astar` will post-process the macro
+    solution into primitive action strings before returning to callers.
+    """
+
+    def __init__(self, base_problem):
+        super().__init__(base_problem.initial)
+        self.base = base_problem
+
+    def goal_test(self, state):
+        return self.base.goal_test(state)
+
+    def successor(self, state):
+        # Generate macro successors from `state` using base problem data
+        succs = []
+        taps_fset, plants_fset, robots_tuple = state
+        taps = dict(taps_fset)
+        plants = dict(plants_fset)
+
+        # interesting targets: taps and plants positions
+        interesting = list(self.base.tap_positions) + list(self.base.plant_positions)
+
+        for (rid, rr, rc, rload, rcap) in robots_tuple:
+            robot_pos = (rr, rc)
+
+            # Macro MOVE: to any interesting target
+            for tgt in interesting:
+                # compute distance using precomputed maps
+                d = None
+                if tgt in self.base.dist_from_plant:
+                    d = self.base.dist_from_plant[tgt].get(robot_pos, float('inf'))
+                if d is None or d == float('inf'):
+                    if tgt in self.base.dist_from_tap:
+                        d = self.base.dist_from_tap[tgt].get(robot_pos, float('inf'))
+                if d is None or d == float('inf'):
+                    continue
+                if d == 0:
+                    # already on target; we still add zero-cost MOVE so sequences are explicit
+                    pass
+
+                # create new robot tuple with position at tgt
+                new_robots = []
+                for (orid, or_, oc, oload, ocap) in robots_tuple:
+                    if orid == rid:
+                        new_robots.append((orid, tgt[0], tgt[1], oload, ocap))
+                    else:
+                        new_robots.append((orid, or_, oc, oload, ocap))
+                new_robots = tuple(sorted(new_robots, key=lambda x: x[0]))
+
+                new_state = (taps_fset, plants_fset, new_robots)
+                action = ("MOVE", int(d), (rid, robot_pos, tgt))
+                succs.append((action, new_state))
+
+            # Macro LOAD: if on a tap, load as many units as possible in one macro action
+            if robot_pos in taps and taps[robot_pos] > 0 and rload < rcap:
+                can_load = min(rcap - rload, taps[robot_pos])
+                new_taps = dict(taps)
+                new_taps[robot_pos] = new_taps[robot_pos] - can_load
+                new_taps_f = tuple(sorted(new_taps.items()))
+
+                new_robots = []
+                for (orid, or_, oc, oload, ocap) in robots_tuple:
+                    if orid == rid:
+                        new_robots.append((orid, or_, oc, oload + can_load, ocap))
+                    else:
+                        new_robots.append((orid, or_, oc, oload, ocap))
+                new_robots = tuple(sorted(new_robots, key=lambda x: x[0]))
+
+                new_state = (new_taps_f, plants_fset, new_robots)
+                action = ("LOAD", int(can_load), (rid, robot_pos))
+                succs.append((action, new_state))
+
+            # Macro POUR: if on a plant, pour as many units as possible in one macro action
+            if robot_pos in plants and plants[robot_pos] > 0 and rload > 0:
+                can_pour = min(rload, plants[robot_pos])
+                new_plants = dict(plants)
+                new_plants[robot_pos] = new_plants[robot_pos] - can_pour
+                new_plants_f = tuple(sorted(new_plants.items()))
+
+                new_robots = []
+                for (orid, or_, oc, oload, ocap) in robots_tuple:
+                    if orid == rid:
+                        new_robots.append((orid, or_, oc, oload - can_pour, ocap))
+                    else:
+                        new_robots.append((orid, or_, oc, oload, ocap))
+                new_robots = tuple(sorted(new_robots, key=lambda x: x[0]))
+
+                new_state = (taps_fset, new_plants_f, new_robots)
+                action = ("POUR", int(can_pour), (rid, robot_pos))
+                succs.append((action, new_state))
+
+        return succs
+
+    def path_cost(self, c, state1, action, state2):
+        # action is a tuple (atype, cost, details)
+        try:
+            atype, acost, _ = action
+            return c + int(acost)
+        except Exception:
+            return super().path_cost(c, state1, action, state2)
+
+
+def reconstruct_primitive_moves(base_problem, rid, start, goal):
+    """Reconstruct a shortest sequence of primitive move action strings
+    from `start` to `goal` for robot `rid` using base_problem's distance maps.
+    Returns list like ['UP{10}', 'RIGHT{10}', ...]."""
+    if start == goal:
+        return []
+    # choose dist map of goal (plant or tap)
+    if goal in base_problem.dist_from_plant:
+        dmap = base_problem.dist_from_plant[goal]
+    elif goal in base_problem.dist_from_tap:
+        dmap = base_problem.dist_from_tap[goal]
+    else:
+        return []
+
+    cur = start
+    moves = []
+    while cur != goal:
+        curd = dmap.get(cur, float('inf'))
+        # find neighbor with dist = curd - 1
+        found = False
+        for nb in base_problem.neighbors.get(cur, []):
+            if dmap.get(nb, float('inf')) == curd - 1:
+                dr, dc = nb[0] - cur[0], nb[1] - cur[1]
+                if (dr, dc) == (-1, 0):
+                    aname = 'UP'
+                elif (dr, dc) == (1, 0):
+                    aname = 'DOWN'
+                elif (dr, dc) == (0, -1):
+                    aname = 'LEFT'
+                else:
+                    aname = 'RIGHT'
+                moves.append(f"{aname}{{{rid}}}")
+                cur = nb
+                found = True
+                break
+        if not found:
+            # no path (shouldn't happen) — abort
+            return []
+    return moves
+
+
+def macro_astar(problem, h=None):
+    """Run A* on the macro action space and convert the macro solution to
+    primitive actions (so callers receive the same primitive-action plan).
+    Returns (node, expanded) matching the original signature.
+    """
+    # create MacroProblem wrapper that uses the same states
+    mp = MacroProblem(problem)
+    # use original astar implementation (saved as _orig_astar earlier)
+    try:
+        res = _orig_astar(mp, h or problem.h_astar)
+    except Exception:
+        # fallback to original if wrapper missing
+        return _orig_astar(problem, h)
+
+    # res may be (node, expanded) or node
+    if isinstance(res, tuple) and len(res) >= 2:
+        mnode, expanded = res[0], res[1]
+    else:
+        mnode, expanded = res, None
+
+    if mnode is None:
+        return res
+
+    # Convert macro node path to a primitive action sequence and rebuild Nodes
+    macro_path = mnode.path()[::-1]
+    primitive_actions = []
+    cur_state = problem.initial
+    for mac in macro_path[1:]:
+        action = mac.action
+        atype, acost, details = action
+        if atype == 'MOVE':
+            rid, start, tgt = details[0], details[1], details[2]
+            moves = reconstruct_primitive_moves(problem, rid, start, tgt)
+            for ma in moves:
+                primitive_actions.append(ma)
+        elif atype == 'LOAD':
+            rid = details[0]
+            count = int(acost)
+            for _ in range(count):
+                primitive_actions.append(f"LOAD{{{rid}}}")
+        elif atype == 'POUR':
+            rid = details[0]
+            count = int(acost)
+            for _ in range(count):
+                primitive_actions.append(f"POUR{{{rid}}}")
+
+        # apply primitive actions to advance cur_state accordingly
+        for pa in primitive_actions[:]:
+            # find successor that matches pa
+            found = False
+            for (a, s2) in problem.successor(cur_state):
+                if a == pa:
+                    cur_state = s2
+                    found = True
+                    break
+            if not found:
+                # if we couldn't apply primitive action, stop conversion
+                break
+        # clear primitive_actions to avoid reapplying in next macro
+        primitive_actions = []
+
+    # Now rebuild a Node chain of primitive steps from initial to goal by re-simulating
+    # using original successor function and creating Nodes with primitive actions.
+    cur_state = problem.initial
+    root = search.Node(cur_state, parent=None, action=None, path_cost=0)
+    last = root
+    full_actions = []
+
+    # Reconstruct full primitive action sequence from the macro path again
+    for mac in macro_path[1:]:
+        action = mac.action
+        atype, acost, details = action
+        if atype == 'MOVE':
+            rid, start, tgt = details
+            moves = reconstruct_primitive_moves(problem, rid, start, tgt)
+            for ma in moves:
+                # apply ma
+                for (a, s2) in problem.successor(cur_state):
+                    if a == ma:
+                        full_actions.append((ma, s2))
+                        cur_state = s2
+                        break
+        elif atype == 'LOAD':
+            rid = details[0]
+            count = int(acost)
+            for _ in range(count):
+                act = f"LOAD{{{rid}}}"
+                for (a, s2) in problem.successor(cur_state):
+                    if a == act:
+                        full_actions.append((act, s2))
+                        cur_state = s2
+                        break
+        elif atype == 'POUR':
+            rid = details[0]
+            count = int(acost)
+            for _ in range(count):
+                act = f"POUR{{{rid}}}"
+                for (a, s2) in problem.successor(cur_state):
+                    if a == act:
+                        full_actions.append((act, s2))
+                        cur_state = s2
+                        break
+
+    # Build Node chain
+    cur = root
+    for (a, s2) in full_actions:
+        pc = problem.path_cost(cur.path_cost, cur.state, a, s2)
+        node = search.Node(s2, parent=cur, action=a, path_cost=pc)
+        cur = node
+
+    return (cur, expanded)
+
 
 id = ["No numbers - I'm special!"]
 
