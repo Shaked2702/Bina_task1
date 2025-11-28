@@ -566,6 +566,46 @@ class WateringProblem(search.Problem):
                 successors.append((action, new_state))
 
         # store as tuple (immutable) to safely cache
+        # Reorder successors to prefer LOAD/POUR and moves that free simple blockers
+        # Detect simple blocking robots:
+        # - a robot occupying a plant that needs water while it has no load and some other robot has load
+        # - a robot occupying a tap with remaining water while it cannot load (load >= cap)
+        occupied_map = { (r2, c2): rid2 for (rid2, r2, c2, _, _) in robots_tuple }
+        blocking_rids = set()
+        # check plants blocking
+        any_robot_with_load = any(r[3] > 0 for r in robots_tuple)
+        for (ppos, pamt) in plants.items():
+            if pamt > 0 and ppos in occupied_map and any_robot_with_load:
+                brid = occupied_map[ppos]
+                # if occupying robot has no load, it's blocking pours
+                if robots[brid][2] == 0:
+                    blocking_rids.add(brid)
+        # check taps blocking
+        for (tpos, tamt) in taps.items():
+            if tamt > 0 and tpos in occupied_map:
+                brid = occupied_map[tpos]
+                # if occupying robot cannot load (full), it's blocking others
+                if robots[brid][2] >= robots[brid][3]:
+                    blocking_rids.add(brid)
+
+        def action_priority(item):
+            # prefer LOAD/POUR (highest), then moves that free blockers, else neutral
+            act, _ = item
+            if act.startswith('LOAD') or act.startswith('POUR'):
+                return (0, 0)
+            # move action like 'UP{rid}'
+            if act[0].isalpha():
+                # extract rid
+                try:
+                    rid_str = act.split('{')[1].split('}')[0]
+                    arid = int(rid_str)
+                except Exception:
+                    arid = None
+                if arid in blocking_rids:
+                    return (1, 0)
+            return (2, 0)
+
+        successors.sort(key=action_priority)
         self._succ_cache[state] = tuple(successors)
         return list(successors)
 
