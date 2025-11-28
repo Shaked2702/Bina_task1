@@ -2,6 +2,61 @@ import ex1_check
 import search
 import utils
 import math
+import time
+
+# Instrumentation: wrap search functions to record runtime and expanded nodes
+try:
+    _orig_astar = search.astar_search
+
+    def _instrumented_astar(problem, h=None):
+        start = time.time()
+        result = _orig_astar(problem, h)
+        end = time.time()
+        # result may be (node, expanded) or node; graph_search returns (node, expanded)
+        expanded = None
+        node = None
+        if isinstance(result, tuple) and len(result) >= 2:
+            node, expanded = result[0], result[1]
+        else:
+            node = result
+        # attach stats to problem for later inspection
+        try:
+            problem.last_search_time = end - start
+            problem.last_search_expanded = expanded
+        except Exception:
+            pass
+        # also print a short summary
+        print(f"[ASTAR] time={end-start:.4f}s expanded={expanded}")
+        return result
+
+    search.astar_search = _instrumented_astar
+except Exception:
+    pass
+
+try:
+    _orig_gbfs = search.greedy_best_first_graph_search
+
+    def _instrumented_gbfs(problem, h=None):
+        start = time.time()
+        result = _orig_gbfs(problem, h)
+        end = time.time()
+        expanded = None
+        node = None
+        if isinstance(result, tuple) and len(result) >= 2:
+            node, expanded = result[0], result[1]
+        else:
+            node = result
+        try:
+            problem.last_search_time = end - start
+            problem.last_search_expanded = expanded
+        except Exception:
+            pass
+        print(f"[GBFS] time={end-start:.4f}s expanded={expanded}")
+        return result
+
+    search.greedy_best_first_graph_search = _instrumented_gbfs
+except Exception:
+    pass
 
 id = ["No numbers - I'm special!"]
 
