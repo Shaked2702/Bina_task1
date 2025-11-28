@@ -231,43 +231,62 @@ class WateringProblem(search.Problem):
         total_loaded = sum(r[3] for r in robots_tuple)
         loads_needed = max(0, total_needed - total_loaded)
 
+        if total_needed == 0:
+            return 0
+
         # If no robots or no capacity, return large heuristic (unreachable)
         if not robots_tuple or self.max_robot_cap <= 0:
             return 10 ** 9
 
-        # Movement lower bound improved by accounting for loaded units and unloaded units separately.
-        # 1) Loaded units: optimistic minimal movement is distance from loaded robot to nearest plant.
+        # Build per-unit plant minimal costs (tap->plant) repeated per required unit
+        plant_unit_costs = []
+        for (pos, amt) in plants.items():
+            if amt <= 0:
+                continue
+            pid = self.plant_id_by_pos.get(pos, None)
+            if pid is None:
+                return 10 ** 9
+            d_plant = self.plant_min_tap_dist.get(pid, float('inf'))
+            if d_plant == float('inf'):
+                return 10 ** 9
+            plant_unit_costs.extend([d_plant] * int(amt))
+
+        plant_unit_costs.sort()  # ascending
+
+        # Loaded units: compute optimistic robot->plant distances for each loaded unit
         loaded_dists = []
-        for (_, rr, rc, rload, rcap) in robots_tuple:
+        for (_, rr, rc, rload, _) in robots_tuple:
+            robot_pos = (rr, rc)
             if rload <= 0:
                 continue
-            robot_pos = (rr, rc)
-            # distance from this robot to nearest plant needing water
-            dmin = float('inf')
-            for ppos, need in plants.items():
-                if need <= 0:
-                    continue
-                # dist from plant to robot_pos (symmetric in grid)
+            # distance to closest plant (any plant needing water)
+            pdmap_min = float('inf')
+            for ppos in plants.keys():
                 pdmap = self.dist_from_plant.get(ppos)
                 if pdmap is None:
                     continue
                 d = pdmap.get(robot_pos, float('inf'))
-                if d < dmin:
-                    dmin = d
-            if dmin == float('inf'):
-                # this robot cannot reach any plant (ignore its loaded units)
+                if d < pdmap_min:
+                    pdmap_min = d
+            if pdmap_min == float('inf'):
                 continue
-            # add rload copies (optimistic per-unit cost)
-            for _ in range(rload):
-                loaded_dists.append(dmin)
+            loaded_dists.extend([pdmap_min] * int(rload))
 
         loaded_dists.sort()
-        # consider at most total_needed loaded units
-        loaded_units_considered = min(sum(r[3] for r in robots_tuple), total_needed)
-        movement_loaded = sum(loaded_dists[:loaded_units_considered]) if loaded_dists else 0
 
-        # 2) Unloaded units: each requires at least robot->tap + tap->plant movement.
-        # optimistic estimate: use minimal robot->nearest_tap and minimal plant_min_tap
+        loaded_used = min(len(loaded_dists), total_needed)
+        # Assign loaded units optimistically to the most expensive plant-unit deliveries
+        # Remove largest plant_unit_costs entries as they can be satisfied by loaded units
+        remaining_units = total_needed
+        if loaded_used > 0:
+            # remove largest loaded_used elements from plant_unit_costs
+            plant_unit_costs = plant_unit_costs[:max(0, len(plant_unit_costs) - loaded_used)]
+            remaining_units = total_needed - loaded_used
+
+        movement_loaded = sum(loaded_dists[:loaded_used]) if loaded_used > 0 else 0
+
+        # For remaining units, each requires robot->tap + tap->plant
+        # robot->tap distance: optimistic min over robots for their distance to nearest tap
         robot_to_tap_min = float('inf')
         for (_, rr, rc, _, _) in robots_tuple:
             robot_pos = (rr, rc)
@@ -275,13 +294,12 @@ class WateringProblem(search.Problem):
             if d < robot_to_tap_min:
                 robot_to_tap_min = d
 
-        plant_min_tap_min = min(self.plant_min_tap_dist.values()) if self.plant_min_tap_dist else float('inf')
-
-        if robot_to_tap_min == float('inf') or plant_min_tap_min == float('inf'):
-            # unreachable parts
+        if robot_to_tap_min == float('inf'):
             return 10 ** 9
 
-        movement_unloaded = loads_needed * (robot_to_tap_min + plant_min_tap_min)
+        # Sum the smallest remaining_units plant unit costs (optimistic assignment)
+        plant_cost_for_unloaded = sum(plant_unit_costs[:remaining_units]) if remaining_units > 0 else 0
+        movement_unloaded = remaining_units * robot_to_tap_min + plant_cost_for_unloaded
 
         movement_lb = movement_loaded + movement_unloaded
 
