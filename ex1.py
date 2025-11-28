@@ -272,92 +272,54 @@ def macro_astar(problem, h=None):
     except Exception:
         problem.last_macro_actions = None
 
-    # Convert macro node path to a primitive action sequence and rebuild Nodes
-    macro_path = mnode.path()[::-1]
-    primitive_actions = []
-    cur_state = problem.initial
-    for mac in macro_path[1:]:
-        action = mac.action
-        atype, acost, details = action
-        if atype == 'MOVE':
-            rid, start, tgt = details[0], details[1], details[2]
-            moves = reconstruct_primitive_moves(problem, rid, start, tgt)
-            for ma in moves:
-                primitive_actions.append(ma)
-        elif atype == 'LOAD':
-            rid = details[0]
-            count = int(acost)
-            for _ in range(count):
-                primitive_actions.append(f"LOAD{{{rid}}}")
-        elif atype == 'POUR':
-            rid = details[0]
-            count = int(acost)
-            for _ in range(count):
-                primitive_actions.append(f"POUR{{{rid}}}")
+    # Convert each macro edge exactly into the shortest primitive sequence
+    # by running a small BFS in the primitive state space from the current
+    # primitive state to the macro successor state. This guarantees the
+    # macro edge cost equals the true primitive cost and preserves
+    # admissibility.
+    from collections import deque
 
-        # apply primitive actions to advance cur_state accordingly
-        for pa in primitive_actions[:]:
-            # find successor that matches pa
-            found = False
-            for (a, s2) in problem.successor(cur_state):
-                if a == pa:
-                    cur_state = s2
-                    found = True
-                    break
-            if not found:
-                # if we couldn't apply primitive action, stop conversion
-                break
-        # clear primitive_actions to avoid reapplying in next macro
-        primitive_actions = []
+    def find_primitive_path(start_state, goal_state):
+        if start_state == goal_state:
+            return []
+        q = deque()
+        q.append((start_state, []))
+        visited = {start_state}
+        while q:
+            s, acts = q.popleft()
+            for (a, s2) in problem.successor(s):
+                if s2 in visited:
+                    continue
+                nas = acts + [a]
+                if s2 == goal_state:
+                    return nas
+                visited.add(s2)
+                q.append((s2, nas))
+        return None
 
-    # Now rebuild a Node chain of primitive steps from initial to goal by re-simulating
-    # using original successor function and creating Nodes with primitive actions.
+    # Walk macro path and expand each macro node to primitive actions using BFS
     cur_state = problem.initial
     root = search.Node(cur_state, parent=None, action=None, path_cost=0)
-    last = root
-    full_actions = []
-
-    # Reconstruct full primitive action sequence from the macro path again
-    for mac in macro_path[1:]:
-        action = mac.action
-        atype, acost, details = action
-        if atype == 'MOVE':
-            rid, start, tgt = details
-            moves = reconstruct_primitive_moves(problem, rid, start, tgt)
-            for ma in moves:
-                # apply ma
-                for (a, s2) in problem.successor(cur_state):
-                    if a == ma:
-                        full_actions.append((ma, s2))
-                        cur_state = s2
-                        break
-        elif atype == 'LOAD':
-            rid = details[0]
-            count = int(acost)
-            for _ in range(count):
-                act = f"LOAD{{{rid}}}"
-                for (a, s2) in problem.successor(cur_state):
-                    if a == act:
-                        full_actions.append((act, s2))
-                        cur_state = s2
-                        break
-        elif atype == 'POUR':
-            rid = details[0]
-            count = int(acost)
-            for _ in range(count):
-                act = f"POUR{{{rid}}}"
-                for (a, s2) in problem.successor(cur_state):
-                    if a == act:
-                        full_actions.append((act, s2))
-                        cur_state = s2
-                        break
-
-    # Build Node chain
     cur = root
-    for (a, s2) in full_actions:
-        pc = problem.path_cost(cur.path_cost, cur.state, a, s2)
-        node = search.Node(s2, parent=cur, action=a, path_cost=pc)
-        cur = node
+    for mac_node in macro_path[1:]:
+        target_state = mac_node.state
+        prim_seq = find_primitive_path(cur_state, target_state)
+        if prim_seq is None:
+            # cannot convert — return original macro node result (best effort)
+            return (mnode, expanded)
+        for a in prim_seq:
+            # find successor state for this primitive action (should exist)
+            next_state = None
+            for (act, s2) in problem.successor(cur_state):
+                if act == a:
+                    next_state = s2
+                    break
+            if next_state is None:
+                return (mnode, expanded)
+            pc = problem.path_cost(cur.path_cost, cur.state, a, next_state)
+            node = search.Node(next_state, parent=cur, action=a, path_cost=pc)
+            cur = node
+            cur_state = next_state
 
     return (cur, expanded)
 
