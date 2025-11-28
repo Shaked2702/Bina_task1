@@ -28,7 +28,70 @@ class WateringProblem(search.Problem):
                                for rid, (r, c, load, cap) in initial.get('Robots', {}).items()),
                               key=lambda x: x[0]))
 
+        # Store immutable initial state (used by search). All heavy precomputations
+        # are kept as attributes on the problem instance (not part of the state).
         state = (size, walls, taps, plants, robots)
+        # Precompute useful static data to keep states small and speed successor/h.
+        self.size = size
+        self.walls = set(walls)
+        # lists of positions
+        self.tap_positions = [pos for (pos, _) in taps]
+        self.plant_positions = [pos for (pos, _) in plants]
+
+        # free cells (cells that are not walls)
+        max_r, max_c = size
+        self.free_cells = {(r, c) for r in range(max_r) for c in range(max_c) if (r, c) not in self.walls}
+
+        # neighbors: for each free cell, allowed adjacent free cells (ignoring robots)
+        moves = [(-1, 0, 'UP'), (1, 0, 'DOWN'), (0, -1, 'LEFT'), (0, 1, 'RIGHT')]
+        self.neighbors = {}
+        for cell in self.free_cells:
+            r, c = cell
+            nb = []
+            for dr, dc, _ in moves:
+                nr, nc = r + dr, c + dc
+                if (nr, nc) in self.free_cells:
+                    nb.append((nr, nc))
+            self.neighbors[cell] = nb
+
+        # Precompute BFS shortest-path distances from each plant and each tap to all cells
+        # (accounts for walls). Store per-target distance maps and also cell->min distance.
+        from collections import deque
+
+        def bfs_from(source):
+            dist = {cell: float('inf') for cell in self.free_cells}
+            q = deque()
+            if source not in self.free_cells:
+                return dist
+            dist[source] = 0
+            q.append(source)
+            while q:
+                cur = q.popleft()
+                for nb in self.neighbors[cur]:
+                    if dist[nb] == float('inf'):
+                        dist[nb] = dist[cur] + 1
+                        q.append(nb)
+            return dist
+
+        # distances from each plant/tap to all cells
+        self.dist_from_plant = {p: bfs_from(p) for p in self.plant_positions}
+        self.dist_from_tap = {t: bfs_from(t) for t in self.tap_positions}
+
+        # minimal distances per cell
+        def min_dist_map(dist_map):
+            if not dist_map:
+                return {cell: float('inf') for cell in self.free_cells}
+            result = {cell: float('inf') for cell in self.free_cells}
+            for source, dmap in dist_map.items():
+                for cell, d in dmap.items():
+                    if d < result[cell]:
+                        result[cell] = d
+            return result
+
+        self.min_dist_to_plant = min_dist_map(self.dist_from_plant)
+        self.min_dist_to_tap = min_dist_map(self.dist_from_tap)
+
+        # finalize parent initialization
         search.Problem.__init__(self, state)
 
     def successor(self, state):
@@ -47,21 +110,26 @@ class WateringProblem(search.Problem):
 
         # robots mapping: rid -> [r, c, load, cap]
         robots = {rid: [r, c, load, cap] for (rid, r, c, load, cap) in robots_tuple}
-        occupied = {(r, c) for (r, c, _, _) in ((r, c, l, cap) for (_, r, c, l, cap) in robots_tuple)}
+        occupied = {(r2, c2) for (_, r2, c2, _, _) in robots_tuple}
 
-        moves = [(-1, 0, 'UP'), (1, 0, 'DOWN'), (0, -1, 'LEFT'), (0, 1, 'RIGHT')]
-
+        # movement via precomputed neighbors (ignores other robots; we still check occupancy)
         for rid, (r, c, load, cap) in robots.items():
-            # Movement
-            for dr, dc, aname in moves:
-                nr, nc = r + dr, c + dc
-                if not (0 <= nr < max_r and 0 <= nc < max_c):
+            # Movement: iterate allowed neighbor cells (precomputed ignoring robots)
+            for (nr, nc) in self.neighbors.get((r, c), []):
+                # occupied by another robot?
+                if (nr, nc) in occupied and not (nr == r and nc == c):
                     continue
-                if (nr, nc) in walls:
-                    continue
-                # occupied by other robot?
-                if any((nr == r2 and nc == c2) for (r2, c2) in occupied if not (r2 == r and c2 == c)):
-                    continue
+
+                # determine action name from delta
+                dr, dc = nr - r, nc - c
+                if (dr, dc) == (-1, 0):
+                    aname = 'UP'
+                elif (dr, dc) == (1, 0):
+                    aname = 'DOWN'
+                elif (dr, dc) == (0, -1):
+                    aname = 'LEFT'
+                else:
+                    aname = 'RIGHT'
 
                 new_robots = []
                 for (orid, or_, oc, oload, ocap) in robots_tuple:
@@ -136,16 +204,17 @@ class WateringProblem(search.Problem):
         plants = {pos: amt for (pos, amt) in plants_fset}
         robots = [(r, c) for (_, r, c, _, _) in robots_tuple]
 
-        def manhattan(a, b):
-            return abs(a[0] - b[0]) + abs(a[1] - b[1])
-
         h = 0
         for (pos, amt) in plants.items():
             if amt <= 0:
                 continue
-            if robots:
-                d = min(manhattan(pos, rob) for rob in robots)
+            # distance from nearest robot to this plant (using precomputed BFS distances)
+            if robots and pos in self.dist_from_plant:
+                d = min(self.dist_from_plant[pos].get(robot_pos, float('inf')) for robot_pos in robots)
+                if d == float('inf'):
+                    d = 0
             else:
+                # no robots or no precomputed map -> fallback to 0
                 d = 0
             h += d + amt
 
