@@ -710,5 +710,62 @@ def create_watering_problem(game):
     return WateringProblem(game)
 
 
+def run_benchmarks():
+    """Run benchmark across built-in sample problems and print a summary table.
+    This keeps all benchmark code inside `ex1.py` as requested.
+    """
+    problems = [
+        ('Problem_pdf', ex1_check.Problem_pdf),
+        ('problem1', ex1_check.problem1),
+        ('problem2', ex1_check.problem2),
+        ('problem3', ex1_check.problem3),
+        ('problem4', ex1_check.problem4),
+        ('problem5_deadend', ex1_check.problem5_deadend),
+        ('problem6', ex1_check.problem6),
+        ('problem7', ex1_check.problem7),
+    ]
+    results = []
+    for name, pdata in problems:
+        row = {'name': name}
+        print('\n==', name, '==')
+        # Macro A*
+        ex1.USE_MACRO = True
+        p = ex1.create_watering_problem(pdata)
+        search.astar_search(p, p.h_astar)
+        row['macro_time'] = getattr(p, 'last_search_time', None)
+        row['macro_expanded'] = getattr(p, 'last_search_expanded', None)
+        row['macro_cost'] = getattr(p, 'last_search_solution_cost', None)
+        row['macro_len'] = getattr(p, 'last_search_solution_length', None)
+
+        # Primitive A*
+        ex1.USE_MACRO = False
+        p2 = ex1.create_watering_problem(pdata)
+        search.astar_search(p2, p2.h_astar)
+        row['prim_time'] = getattr(p2, 'last_search_time', None)
+        row['prim_expanded'] = getattr(p2, 'last_search_expanded', None)
+        row['prim_cost'] = getattr(p2, 'last_search_solution_cost', None)
+        row['prim_len'] = getattr(p2, 'last_search_solution_length', None)
+
+        # GBFS
+        p3 = ex1.create_watering_problem(pdata)
+        search.greedy_best_first_graph_search(p3, p3.h_gbfs)
+        row['gbfs_time'] = getattr(p3, 'last_search_time', None)
+        row['gbfs_expanded'] = getattr(p3, 'last_search_expanded', None)
+        row['gbfs_cost'] = getattr(p3, 'last_search_solution_cost', None)
+        row['gbfs_len'] = getattr(p3, 'last_search_solution_length', None)
+
+        # admissibility check: compare macro vs prim costs when both present
+        row['admissible'] = None
+        if row['macro_cost'] is not None and row['prim_cost'] is not None:
+            row['admissible'] = (row['macro_cost'] == row['prim_cost'])
+        results.append(row)
+
+    # print table
+    print('\nBenchmark results:')
+    print('name | macro_time(s) | macro_exp | macro_cost | prim_time(s) | prim_exp | prim_cost | gbfs_time(s) | gbfs_exp | gbfs_cost | macro_adm')
+    for r in results:
+        print(f"{r['name']} | {r['macro_time']:.4f} | {r['macro_expanded']} | {r['macro_cost']} | {r['prim_time']:.4f} | {r['prim_expanded']} | {r['prim_cost']} | {r['gbfs_time']:.4f} | {r['gbfs_expanded']} | {r['gbfs_cost']} | {r['admissible']}")
+
+
 if __name__ == '__main__':
     ex1_check.main()
