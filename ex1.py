@@ -1,6 +1,7 @@
 import ex1_check
 import search
 import utils
+import math
 
 id = ["No numbers - I'm special!"]
 
@@ -21,16 +22,19 @@ class WateringProblem(search.Problem):
         and robots_tuple is a tuple of (rid, r, c, load, cap) sorted by rid.
         """
         size = tuple(initial['Size'])
-        walls = frozenset(initial.get('Walls', set()))
-        taps = frozenset(((pos, amt) for pos, amt in initial.get('Taps', {}).items()))
-        plants = frozenset(((pos, amt) for pos, amt in initial.get('Plants', {}).items()))
+        # Use sorted tuples instead of frozensets so the state is deterministic
+        # while remaining immutable and hashable.
+        walls = tuple(sorted(initial.get('Walls', set())))
+        taps = tuple(sorted(initial.get('Taps', {}).items()))
+        plants = tuple(sorted(initial.get('Plants', {}).items()))
         robots = tuple(sorted(((rid, r, c, load, cap)
                                for rid, (r, c, load, cap) in initial.get('Robots', {}).items()),
                               key=lambda x: x[0]))
 
-        # Store immutable initial state (used by search). All heavy precomputations
-        # are kept as attributes on the problem instance (not part of the state).
-        state = (size, walls, taps, plants, robots)
+        # Store immutable initial state (used by search). Keep static data
+        # (size, walls, neighbors, distances) as instance attributes to keep
+        # the per-state representation small.
+        state = (taps, plants, robots)
         # Precompute useful static data to keep states small and speed successor/h.
         self.size = size
         self.walls = set(walls)
@@ -77,6 +81,36 @@ class WateringProblem(search.Problem):
         self.dist_from_plant = {p: bfs_from(p) for p in self.plant_positions}
         self.dist_from_tap = {t: bfs_from(t) for t in self.tap_positions}
 
+        # assign stable integer IDs for plants and taps for convenient indexing
+        self.plant_pos_by_id = list(self.plant_positions)
+        self.plant_id_by_pos = {pos: i for i, pos in enumerate(self.plant_pos_by_id)}
+        self.tap_pos_by_id = list(self.tap_positions)
+        self.tap_id_by_pos = {pos: i for i, pos in enumerate(self.tap_pos_by_id)}
+
+        # per-target maps keyed by id (same data, indexed by integer ids)
+        self.dist_from_plant_id = {self.plant_id_by_pos[pos]: dmap
+                                   for pos, dmap in self.dist_from_plant.items()}
+        self.dist_from_tap_id = {self.tap_id_by_pos[pos]: dmap
+                                 for pos, dmap in self.dist_from_tap.items()}
+
+        # minimal distance from each plant to the nearest tap (used in heuristic)
+        self.plant_min_tap_dist = {}
+        for pid, pos in enumerate(self.plant_pos_by_id):
+            # compute min distance from any tap position to this plant
+            dmin = float('inf')
+            for tpos in self.tap_positions:
+                d = self.dist_from_plant[pos].get(tpos, float('inf'))
+                if d < dmin:
+                    dmin = d
+            self.plant_min_tap_dist[pid] = dmin
+
+        # record max robot capacity (used to compute optimistic #trips)
+        # initial robots are in the `robots` tuple we stored in the starting state
+        if robots:
+            self.max_robot_cap = max(cap for (_, _, _, _, cap) in robots)
+        else:
+            self.max_robot_cap = 0
+
         # minimal distances per cell
         def min_dist_map(dist_map):
             if not dist_map:
@@ -101,10 +135,10 @@ class WateringProblem(search.Problem):
         """
         successors = []
 
-        size, walls_fset, taps_fset, plants_fset, robots_tuple = state
-        max_r, max_c = size[0], size[1]
+        taps_fset, plants_fset, robots_tuple = state
+        max_r, max_c = self.size[0], self.size[1]
 
-        walls = set(walls_fset)
+        walls = self.walls
         taps = dict(taps_fset)
         plants = dict(plants_fset)
 
@@ -139,7 +173,7 @@ class WateringProblem(search.Problem):
                         new_robots.append((orid, or_, oc, oload, ocap))
                 new_robots = tuple(sorted(new_robots, key=lambda x: x[0]))
 
-                new_state = (size, walls_fset, taps_fset, plants_fset, new_robots)
+                new_state = (taps_fset, plants_fset, new_robots)
                 action = f"{aname}{{{rid}}}"
                 successors.append((action, new_state))
 
@@ -147,7 +181,7 @@ class WateringProblem(search.Problem):
             if (r, c) in taps and taps[(r, c)] > 0 and load < cap:
                 new_taps = dict(taps)
                 new_taps[(r, c)] = new_taps[(r, c)] - 1
-                new_taps_f = frozenset(new_taps.items())
+                new_taps_f = tuple(sorted(new_taps.items()))
 
                 new_robots = []
                 for (orid, or_, oc, oload, ocap) in robots_tuple:
@@ -157,7 +191,7 @@ class WateringProblem(search.Problem):
                         new_robots.append((orid, or_, oc, oload, ocap))
                 new_robots = tuple(sorted(new_robots, key=lambda x: x[0]))
 
-                new_state = (size, walls_fset, new_taps_f, plants_fset, new_robots)
+                new_state = (new_taps_f, plants_fset, new_robots)
                 action = f"LOAD{{{rid}}}"
                 successors.append((action, new_state))
 
@@ -165,7 +199,7 @@ class WateringProblem(search.Problem):
             if (r, c) in plants and plants[(r, c)] > 0 and load > 0:
                 new_plants = dict(plants)
                 new_plants[(r, c)] = new_plants[(r, c)] - 1
-                new_plants_f = frozenset(new_plants.items())
+                new_plants_f = tuple(sorted(new_plants.items()))
 
                 new_robots = []
                 for (orid, or_, oc, oload, ocap) in robots_tuple:
@@ -175,7 +209,7 @@ class WateringProblem(search.Problem):
                         new_robots.append((orid, or_, oc, oload, ocap))
                 new_robots = tuple(sorted(new_robots, key=lambda x: x[0]))
 
-                new_state = (size, walls_fset, taps_fset, new_plants_f, new_robots)
+                new_state = (taps_fset, new_plants_f, new_robots)
                 action = f"POUR{{{rid}}}"
                 successors.append((action, new_state))
 
@@ -183,24 +217,81 @@ class WateringProblem(search.Problem):
 
     def goal_test(self, state):
         """Return True iff all plants have received required water (remaining==0)."""
-        _, _, _, plants_fset, _ = state
+        taps_fset, plants_fset, robots_tuple = state
         plants = dict(plants_fset)
         return all(amt == 0 for amt in plants.values())
 
     def h_astar(self, node):
         """Admissible heuristic: lower bound = pours needed + loads needed."""
         state = node.state
-        _, _, _, plants_fset, robots_tuple = state
+        taps_fset, plants_fset, robots_tuple = state
         plants = dict(plants_fset)
+
         total_needed = sum(v for v in plants.values())
         total_loaded = sum(r[3] for r in robots_tuple)
         loads_needed = max(0, total_needed - total_loaded)
-        return int(total_needed + loads_needed)
+
+        # If no robots or no capacity, return large heuristic (unreachable)
+        if not robots_tuple or self.max_robot_cap <= 0:
+            return 10 ** 9
+
+        # Movement lower bound improved by accounting for loaded units and unloaded units separately.
+        # 1) Loaded units: optimistic minimal movement is distance from loaded robot to nearest plant.
+        loaded_dists = []
+        for (_, rr, rc, rload, rcap) in robots_tuple:
+            if rload <= 0:
+                continue
+            robot_pos = (rr, rc)
+            # distance from this robot to nearest plant needing water
+            dmin = float('inf')
+            for ppos, need in plants.items():
+                if need <= 0:
+                    continue
+                # dist from plant to robot_pos (symmetric in grid)
+                pdmap = self.dist_from_plant.get(ppos)
+                if pdmap is None:
+                    continue
+                d = pdmap.get(robot_pos, float('inf'))
+                if d < dmin:
+                    dmin = d
+            if dmin == float('inf'):
+                # this robot cannot reach any plant (ignore its loaded units)
+                continue
+            # add rload copies (optimistic per-unit cost)
+            for _ in range(rload):
+                loaded_dists.append(dmin)
+
+        loaded_dists.sort()
+        # consider at most total_needed loaded units
+        loaded_units_considered = min(sum(r[3] for r in robots_tuple), total_needed)
+        movement_loaded = sum(loaded_dists[:loaded_units_considered]) if loaded_dists else 0
+
+        # 2) Unloaded units: each requires at least robot->tap + tap->plant movement.
+        # optimistic estimate: use minimal robot->nearest_tap and minimal plant_min_tap
+        robot_to_tap_min = float('inf')
+        for (_, rr, rc, _, _) in robots_tuple:
+            robot_pos = (rr, rc)
+            d = self.min_dist_to_tap.get(robot_pos, float('inf'))
+            if d < robot_to_tap_min:
+                robot_to_tap_min = d
+
+        plant_min_tap_min = min(self.plant_min_tap_dist.values()) if self.plant_min_tap_dist else float('inf')
+
+        if robot_to_tap_min == float('inf') or plant_min_tap_min == float('inf'):
+            # unreachable parts
+            return 10 ** 9
+
+        movement_unloaded = loads_needed * (robot_to_tap_min + plant_min_tap_min)
+
+        movement_lb = movement_loaded + movement_unloaded
+
+        h = total_needed + loads_needed + movement_lb
+        return int(h)
 
     def h_gbfs(self, node):
         """Greedy heuristic: sum of distances from robots to plants plus pours."""
         state = node.state
-        _, _, _, plants_fset, robots_tuple = state
+        taps_fset, plants_fset, robots_tuple = state
         plants = {pos: amt for (pos, amt) in plants_fset}
         robots = [(r, c) for (_, r, c, _, _) in robots_tuple]
 
