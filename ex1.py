@@ -39,6 +39,8 @@ try:
                 sol_cost = node.path_cost
                 problem.last_search_solution_length = sol_len
                 problem.last_search_solution_cost = sol_cost
+                # store the primitive action list
+                problem.last_search_solution_actions = actions
         except Exception:
             pass
 
@@ -80,6 +82,7 @@ try:
                 sol_cost = node.path_cost
                 problem.last_search_solution_length = sol_len
                 problem.last_search_solution_cost = sol_cost
+                problem.last_search_solution_actions = actions
         except Exception:
             pass
         print(f"[GBFS] time={end-start:.4f}s expanded={expanded} cost={sol_cost} len={sol_len}")
@@ -261,6 +264,13 @@ def macro_astar(problem, h=None):
 
     if mnode is None:
         return res
+    # record macro action sequence on the original problem for inspection
+    try:
+        macro_path = mnode.path()[::-1]
+        macro_actions = [pi.action for pi in macro_path][1:]
+        problem.last_macro_actions = macro_actions
+    except Exception:
+        problem.last_macro_actions = None
 
     # Convert macro node path to a primitive action sequence and rebuild Nodes
     macro_path = mnode.path()[::-1]
