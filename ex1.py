@@ -28,8 +28,23 @@ try:
             problem.last_search_expanded = expanded
         except Exception:
             pass
-        # also print a short summary
-        print(f"[ASTAR] time={end-start:.4f}s expanded={expanded}")
+        # compute and attach extra info (solution length and cost) when available
+        sol_len = None
+        sol_cost = None
+        try:
+            if isinstance(node, search.Node):
+                path = node.path()[::-1]
+                actions = [pi.action for pi in path][1:]
+                sol_len = len(actions)
+                sol_cost = node.path_cost
+                problem.last_search_solution_length = sol_len
+                problem.last_search_solution_cost = sol_cost
+        except Exception:
+            pass
+
+        # also print a short summary including cost and length
+        mode = 'MACRO' if USE_MACRO else 'PRIMITIVE'
+        print(f"[ASTAR:{mode}] time={end-start:.4f}s expanded={expanded} cost={sol_cost} len={sol_len}")
         return result
 
     search.astar_search = _instrumented_astar
@@ -54,7 +69,20 @@ try:
             problem.last_search_expanded = expanded
         except Exception:
             pass
-        print(f"[GBFS] time={end-start:.4f}s expanded={expanded}")
+        # compute extra info for GBFS as well
+        sol_len = None
+        sol_cost = None
+        try:
+            if isinstance(node, search.Node):
+                path = node.path()[::-1]
+                actions = [pi.action for pi in path][1:]
+                sol_len = len(actions)
+                sol_cost = node.path_cost
+                problem.last_search_solution_length = sol_len
+                problem.last_search_solution_cost = sol_cost
+        except Exception:
+            pass
+        print(f"[GBFS] time={end-start:.4f}s expanded={expanded} cost={sol_cost} len={sol_len}")
         return result
 
     search.greedy_best_first_graph_search = _instrumented_gbfs
