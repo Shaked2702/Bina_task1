@@ -126,7 +126,7 @@ class MacroProblem(search.Problem):
 
             # Macro MOVE: to any interesting target
             for tgt in interesting:
-                # compute distance using precomputed maps
+                # compute distance using precomputed maps to quickly skip unreachable targets
                 d = None
                 if tgt in self.base.dist_from_plant:
                     d = self.base.dist_from_plant[tgt].get(robot_pos, float('inf'))
@@ -135,9 +135,6 @@ class MacroProblem(search.Problem):
                         d = self.base.dist_from_tap[tgt].get(robot_pos, float('inf'))
                 if d is None or d == float('inf'):
                     continue
-                if d == 0:
-                    # already on target; we still add zero-cost MOVE so sequences are explicit
-                    pass
 
                 # create new robot tuple with position at tgt
                 new_robots = []
@@ -149,7 +146,31 @@ class MacroProblem(search.Problem):
                 new_robots = tuple(sorted(new_robots, key=lambda x: x[0]))
 
                 new_state = (taps_fset, plants_fset, new_robots)
-                action = ("MOVE", int(d), (rid, robot_pos, tgt))
+
+                # Compute exact primitive cost between `state` and `new_state` using BFS
+                from collections import deque
+                def primitive_distance(s1, s2):
+                    if s1 == s2:
+                        return 0
+                    q = deque()
+                    q.append((s1, 0))
+                    seen = {s1}
+                    while q:
+                        cur, dist = q.popleft()
+                        for (a2, s2c) in self.base.successor(cur):
+                            if s2c in seen:
+                                continue
+                            if s2c == s2:
+                                return dist + 1
+                            seen.add(s2c)
+                            q.append((s2c, dist + 1))
+                    return None
+
+                prim_d = primitive_distance(state, new_state)
+                if prim_d is None:
+                    # cannot reach new_state under primitive rules (should be rare)
+                    continue
+                action = ("MOVE", int(prim_d), (rid, robot_pos, tgt))
                 succs.append((action, new_state))
 
             # Macro LOAD: if on a tap, load as many units as possible in one macro action
