@@ -747,6 +747,8 @@ def run_benchmarks():
         row['macro_expanded'] = getattr(p, 'last_search_expanded', None)
         row['macro_cost'] = getattr(p, 'last_search_solution_cost', None)
         row['macro_len'] = getattr(p, 'last_search_solution_length', None)
+        row['macro_actions'] = getattr(p, 'last_search_solution_actions', None)
+        row['macro_macro_actions'] = getattr(p, 'last_macro_actions', None)
 
         # Primitive A*
         USE_MACRO = False
@@ -756,6 +758,7 @@ def run_benchmarks():
         row['prim_expanded'] = getattr(p2, 'last_search_expanded', None)
         row['prim_cost'] = getattr(p2, 'last_search_solution_cost', None)
         row['prim_len'] = getattr(p2, 'last_search_solution_length', None)
+        row['prim_actions'] = getattr(p2, 'last_search_solution_actions', None)
 
         # GBFS
         p3 = create_watering_problem(pdata)
@@ -764,6 +767,7 @@ def run_benchmarks():
         row['gbfs_expanded'] = getattr(p3, 'last_search_expanded', None)
         row['gbfs_cost'] = getattr(p3, 'last_search_solution_cost', None)
         row['gbfs_len'] = getattr(p3, 'last_search_solution_length', None)
+        row['gbfs_actions'] = getattr(p3, 'last_search_solution_actions', None)
 
         # admissibility check: compare macro vs prim costs when both present
         row['admissible'] = None
@@ -776,6 +780,11 @@ def run_benchmarks():
     print('name | macro_time(s) | macro_exp | macro_cost | prim_time(s) | prim_exp | prim_cost | gbfs_time(s) | gbfs_exp | gbfs_cost | macro_adm')
     for r in results:
         print(f"{r['name']} | {r['macro_time']:.4f} | {r['macro_expanded']} | {r['macro_cost']} | {r['prim_time']:.4f} | {r['prim_expanded']} | {r['prim_cost']} | {r['gbfs_time']:.4f} | {r['gbfs_expanded']} | {r['gbfs_cost']} | {r['admissible']}")
+        if r['admissible'] is False:
+            print('  -- ADMISSIBILITY WARNING: macro cost != primitive cost')
+            print('  macro primitive actions:', r.get('macro_actions'))
+            print('  macro macro-actions (abstract):', r.get('macro_macro_actions'))
+            print('  primitive actions:', r.get('prim_actions'))
 
 
 if __name__ == '__main__':
