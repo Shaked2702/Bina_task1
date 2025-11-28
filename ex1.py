@@ -729,8 +729,9 @@ def run_benchmarks():
         row = {'name': name}
         print('\n==', name, '==')
         # Macro A*
-        ex1.USE_MACRO = True
-        p = ex1.create_watering_problem(pdata)
+        global USE_MACRO
+        USE_MACRO = True
+        p = create_watering_problem(pdata)
         search.astar_search(p, p.h_astar)
         row['macro_time'] = getattr(p, 'last_search_time', None)
         row['macro_expanded'] = getattr(p, 'last_search_expanded', None)
@@ -738,8 +739,8 @@ def run_benchmarks():
         row['macro_len'] = getattr(p, 'last_search_solution_length', None)
 
         # Primitive A*
-        ex1.USE_MACRO = False
-        p2 = ex1.create_watering_problem(pdata)
+        USE_MACRO = False
+        p2 = create_watering_problem(pdata)
         search.astar_search(p2, p2.h_astar)
         row['prim_time'] = getattr(p2, 'last_search_time', None)
         row['prim_expanded'] = getattr(p2, 'last_search_expanded', None)
@@ -747,7 +748,7 @@ def run_benchmarks():
         row['prim_len'] = getattr(p2, 'last_search_solution_length', None)
 
         # GBFS
-        p3 = ex1.create_watering_problem(pdata)
+        p3 = create_watering_problem(pdata)
         search.greedy_best_first_graph_search(p3, p3.h_gbfs)
         row['gbfs_time'] = getattr(p3, 'last_search_time', None)
         row['gbfs_expanded'] = getattr(p3, 'last_search_expanded', None)
