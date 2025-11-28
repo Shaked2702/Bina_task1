@@ -182,12 +182,22 @@ class WateringProblem(search.Problem):
 
         # finalize parent initialization
         search.Problem.__init__(self, state)
+        # Caches to avoid repeated work during search (keyed by immutable state)
+        self._succ_cache = {}
+        self._h_astar_cache = {}
+        self._h_gbfs_cache = {}
 
     def successor(self, state):
         """Generate successor states: return list of (action_str, next_state).
 
         Actions: UP{rid}, DOWN{rid}, LEFT{rid}, RIGHT{rid}, LOAD{rid}, POUR{rid}.
         """
+        # Use cache to avoid recomputing successors for the same state
+        cached = self._succ_cache.get(state)
+        if cached is not None:
+            # return a fresh list so callers can mutate if they (incorrectly) want to
+            return list(cached)
+
         successors = []
 
         taps_fset, plants_fset, robots_tuple = state
@@ -268,7 +278,9 @@ class WateringProblem(search.Problem):
                 action = f"POUR{{{rid}}}"
                 successors.append((action, new_state))
 
-        return successors
+        # store as tuple (immutable) to safely cache
+        self._succ_cache[state] = tuple(successors)
+        return list(successors)
 
     def goal_test(self, state):
         """Return True iff all plants have received required water (remaining==0)."""
@@ -279,6 +291,9 @@ class WateringProblem(search.Problem):
     def h_astar(self, node):
         """Admissible heuristic: lower bound = pours needed + loads needed."""
         state = node.state
+        cached = self._h_astar_cache.get(state)
+        if cached is not None:
+            return cached
         taps_fset, plants_fset, robots_tuple = state
         plants = dict(plants_fset)
 
@@ -359,11 +374,16 @@ class WateringProblem(search.Problem):
         movement_lb = movement_loaded + movement_unloaded
 
         h = total_needed + loads_needed + movement_lb
-        return int(h)
+        val = int(h)
+        self._h_astar_cache[state] = val
+        return val
 
     def h_gbfs(self, node):
         """Greedy heuristic: sum of distances from robots to plants plus pours."""
         state = node.state
+        cached = self._h_gbfs_cache.get(state)
+        if cached is not None:
+            return cached
         taps_fset, plants_fset, robots_tuple = state
         plants = {pos: amt for (pos, amt) in plants_fset}
         robots = [(r, c) for (_, r, c, _, _) in robots_tuple]
@@ -384,7 +404,9 @@ class WateringProblem(search.Problem):
 
         loaded = sum(r[3] for r in robots_tuple)
         h = max(0, h - loaded)
-        return int(h)
+        val = int(h)
+        self._h_gbfs_cache[state] = val
+        return val
 
 
 def create_watering_problem(game):
