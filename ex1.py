@@ -419,9 +419,18 @@ class WateringProblem(search.Problem):
                         q.append(nb)
             return dist
 
-        # distances from each plant/tap to all cells
+        # distances from each plant/tap to all cells (existing views)
         self.dist_from_plant = {p: bfs_from(p) for p in self.plant_positions}
         self.dist_from_tap = {t: bfs_from(t) for t in self.tap_positions}
+
+        # --- APSP (lazy): distances between pairs of free cells ---
+        # We keep a cache `dist_all` but compute BFS maps on demand to reduce
+        # startup time and memory usage on large grids.
+        self.dist_all = {}            # map: source_cell -> {cell: dist}
+        self._bfs_from = bfs_from     # keep function for lazy calls
+
+        # Lazy cache for tap->plant pair distances
+        self.tap_plant_dist = {}
 
         # assign stable integer IDs for plants and taps for convenient indexing
         self.plant_pos_by_id = list(self.plant_positions)
@@ -473,6 +482,19 @@ class WateringProblem(search.Problem):
         self._succ_cache = {}
         self._h_astar_cache = {}
         self._h_gbfs_cache = {}
+
+    def _ensure_dist(self, source):
+        """Ensure we have a BFS distance map from `source` in `self.dist_all`.
+        Runs BFS from `source` if necessary and caches the result.
+        """
+        if source not in self.dist_all:
+            self.dist_all[source] = self._bfs_from(source)
+
+    def _dist(self, a, b):
+        """Return shortest-path distance a->b (inf if unreachable)."""
+        # try to use precomputed direct maps first
+        self._ensure_dist(a)
+        return self.dist_all.get(a, {}).get(b, float('inf'))
 
     def successor(self, state):
         """Generate successor states: return list of (action_str, next_state).
@@ -631,77 +653,117 @@ class WateringProblem(search.Problem):
         if total_needed == 0:
             return 0
 
-        # If no robots or no capacity, return large heuristic (unreachable)
         if not robots_tuple or self.max_robot_cap <= 0:
             return 10 ** 9
 
-        # Build per-unit plant minimal costs (tap->plant) repeated per required unit
-        plant_unit_costs = []
-        for (pos, amt) in plants.items():
-            if amt <= 0:
-                continue
-            pid = self.plant_id_by_pos.get(pos, None)
-            if pid is None:
-                return 10 ** 9
-            d_plant = self.plant_min_tap_dist.get(pid, float('inf'))
-            if d_plant == float('inf'):
-                return 10 ** 9
-            plant_unit_costs.extend([d_plant] * int(amt))
+        # Occupied positions by robots (used for collision checks)
+        occupied_positions = {(r, c) for (_, r, c, _, _) in robots_tuple}
 
-        plant_unit_costs.sort()  # ascending
+        # Helper: reconstruct a shortest path (list of coords) from a -> b using precomputed dist maps
+        def reconstruct_coords(start, goal):
+            if start == goal:
+                return [start]
+            # use dist_all[goal] map which gives distance from goal to every cell
+            dmap = self.dist_all.get(goal)
+            if dmap is None:
+                return []
+            cur = start
+            path = [cur]
+            # if unreachable
+            if dmap.get(cur, float('inf')) == float('inf'):
+                return []
+            while cur != goal:
+                curd = dmap.get(cur, float('inf'))
+                # pick neighbor with dist = curd - 1
+                found = False
+                for nb in self.neighbors.get(cur, []):
+                    if dmap.get(nb, float('inf')) == curd - 1:
+                        cur = nb
+                        path.append(cur)
+                        found = True
+                        break
+                if not found:
+                    return []
+            return path
 
-        # Loaded units: compute optimistic robot->plant distances per robot (one entry per robot with load)
-        # Counting once per robot is admissible (robots can pour multiple units at the same plant).
-        loaded_dists = []
-        for (_, rr, rc, rload, _) in robots_tuple:
+        # For each robot, compute optimistic best target (tap, plant) and include collision penalties
+        per_robot_costs = []
+        taps = dict(taps_fset)
+
+        for (rid, rr, rc, rload, rcap) in robots_tuple:
             robot_pos = (rr, rc)
-            if rload <= 0:
-                continue
-            pdmap_min = float('inf')
-            for ppos in plants.keys():
-                pdmap = self.dist_from_plant.get(ppos)
-                if pdmap is None:
-                    continue
-                d = pdmap.get(robot_pos, float('inf'))
-                if d < pdmap_min:
-                    pdmap_min = d
-            if pdmap_min == float('inf'):
-                continue
-            loaded_dists.append(pdmap_min)
+            best_cost = float('inf')
 
-        loaded_dists.sort()
+            # If robot already carries water, only consider plants
+            if rload > 0:
+                for ppos, pamt in plants.items():
+                    if pamt <= 0:
+                        continue
+                    base = self._dist(robot_pos, ppos)
+                    if base == float('inf'):
+                        continue
+                    # reconstruct path and check blockers
+                    path_coords = reconstruct_coords(robot_pos, ppos)
+                    blockers = [bpos for bpos in occupied_positions if bpos != robot_pos and bpos in path_coords]
+                    penalty = 0
+                    for bpos in blockers:
+                        # admissible lower bound: distance from blocker to nearest free cell outside the path
+                        cand_cells = [c for c in self.free_cells if c not in path_coords]
+                        if not cand_cells:
+                            # no outside cell -> conservatively don't add penalty (lower bound)
+                            continue
+                        dmin = min(self._dist(bpos, c) for c in cand_cells)
+                        if dmin == float('inf'):
+                            dmin = 0
+                        penalty += dmin
+                    best_cost = min(best_cost, base + penalty)
+            else:
+                # need to visit a tap then plant
+                for tpos, tamt in taps.items():
+                    if tamt <= 0:
+                        continue
+                    for ppos, pamt in plants.items():
+                        if pamt <= 0:
+                            continue
+                        d1 = self._dist(robot_pos, tpos)
+                        # lazy compute tap->plant distance
+                        if (tpos, ppos) in self.tap_plant_dist:
+                            d2 = self.tap_plant_dist[(tpos, ppos)]
+                        else:
+                            d2 = self._dist(tpos, ppos)
+                            self.tap_plant_dist[(tpos, ppos)] = d2
+                        if d1 == float('inf') or d2 == float('inf'):
+                            continue
+                        base = d1 + d2
+                        # reconstruct coords: robot->tap then tap->plant (avoid duplicate tap)
+                        path1 = reconstruct_coords(robot_pos, tpos)
+                        path2 = reconstruct_coords(tpos, ppos)
+                        if not path1 or not path2:
+                            continue
+                        path_coords = path1 + path2[1:]
+                        blockers = [bpos for bpos in occupied_positions if bpos != robot_pos and bpos in path_coords]
+                        penalty = 0
+                        for bpos in blockers:
+                            cand_cells = [c for c in self.free_cells if c not in path_coords]
+                            if not cand_cells:
+                                continue
+                            dmin = min(self._dist(bpos, c) for c in cand_cells)
+                            if dmin == float('inf'):
+                                dmin = 0
+                            penalty += dmin
+                        best_cost = min(best_cost, base + penalty)
 
-        # We can use at most one loaded robot assignment per robot (admissible),
-        # and they reduce the number of remaining units by up to the sum of robot loads.
-        total_loaded_units = sum(r[3] for r in robots_tuple)
-        loaded_used_units = min(total_loaded_units, total_needed)
-        # conservative movement estimate for loaded robots: sum of minimal distances for each robot that has any load
-        movement_loaded = sum(loaded_dists)
-        # remaining units after using existing loaded water
-        remaining_units = max(0, total_needed - total_loaded_units)
+            # If nothing reachable, set a large cost
+            if best_cost == float('inf'):
+                best_cost = 10 ** 6
+            per_robot_costs.append(best_cost)
 
-        # For remaining units, plan optimistic number of trips considering robot capacities
-        # robot->tap distance: optimistic min over robots for their distance to nearest tap
-        robot_to_tap_min = float('inf')
-        for (_, rr, rc, _, _) in robots_tuple:
-            robot_pos = (rr, rc)
-            d = self.min_dist_to_tap.get(robot_pos, float('inf'))
-            if d < robot_to_tap_min:
-                robot_to_tap_min = d
+        # Primary heuristic: sum of per-robot minimal costs + remaining pours/load estimates
+        h_val = sum(per_robot_costs)
+        # add small term for remaining units to encourage satisfying pours
+        h_val += loads_needed
 
-        if robot_to_tap_min == float('inf'):
-            return 10 ** 9
-
-        # trips needed (each trip can carry up to max_robot_cap units)
-        trips = int(math.ceil(remaining_units / float(self.max_robot_cap))) if remaining_units > 0 else 0
-        # minimal tap->plant distance per trip (optimistic): take the smallest plant unit cost
-        plant_min_cost = min(plant_unit_costs) if plant_unit_costs else 0
-        movement_unloaded = trips * (robot_to_tap_min + plant_min_cost)
-
-        movement_lb = movement_loaded + movement_unloaded
-
-        h = total_needed + loads_needed + movement_lb
-        val = int(h)
+        val = int(h_val)
         self._h_astar_cache[state] = val
         return val
 
