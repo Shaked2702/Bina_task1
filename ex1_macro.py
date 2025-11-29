@@ -95,7 +95,7 @@ class WateringProblem(search.Problem):
     def successor(self, state):
         """Generate successors: list of (action_str, next_state)
         Actions: UP{rid}, DOWN{rid}, LEFT{rid}, RIGHT{rid}, LOAD{rid}, POUR{rid}
-        Exactly one robot moves per step.
+        Additionally: MOVETO macro encoded as "MOVETO{rid}:<steps>:r,c"
         """
         taps_f, plants_f, robots_t = state
         taps = dict(taps_f)
@@ -106,13 +106,13 @@ class WateringProblem(search.Problem):
 
         succs = []
 
-        # movement actions
+        # primitive movement actions (single-step)
         for rid, (r, c, load, cap) in robots.items():
             for nb in self.neighbors.get((r, c), []):
                 if nb in occupied and nb != (r, c):
                     continue
                 nr, nc = nb
-                # create new robots tuple
+                # create new robots tuple with this robot moved one step
                 new_robots = []
                 for orid, orr, orc, ol, oc in robots_t:
                     if orid == rid:
@@ -121,21 +121,23 @@ class WateringProblem(search.Problem):
                         new_robots.append((orid, orr, orc, ol, oc))
                 new_robots = tuple(sorted(new_robots, key=lambda x: x[0]))
                 new_state = (taps_f, plants_f, new_robots)
-                dr, dc = nr - r, nc - c
+                # movement action string must match required format
+                dr, dc = (nr - r, nc - c)
                 if (dr, dc) == (-1, 0):
-                    an = f"UP{{{rid}}}"
+                    act = f"UP{{{rid}}}"
                 elif (dr, dc) == (1, 0):
-                    an = f"DOWN{{{rid}}}"
+                    act = f"DOWN{{{rid}}}"
                 elif (dr, dc) == (0, -1):
-                    an = f"LEFT{{{rid}}}"
+                    act = f"LEFT{{{rid}}}"
                 else:
-                    an = f"RIGHT{{{rid}}}"
-                succs.append((an, new_state))
+                    act = f"RIGHT{{{rid}}}"
+                succs.append((act, new_state))
 
-            # LOAD
+        # LOAD actions
+        for rid, (r, c, load, cap) in robots.items():
             if (r, c) in taps and taps[(r, c)] > 0 and load < cap:
                 new_taps = dict(taps)
-                new_taps[(r, c)] = new_taps[(r, c)] - 1
+                new_taps[(r, c)] -= 1
                 new_taps_f = tuple(sorted(new_taps.items()))
                 new_robots = []
                 for orid, orr, orc, ol, oc in robots_t:
@@ -144,14 +146,13 @@ class WateringProblem(search.Problem):
                     else:
                         new_robots.append((orid, orr, orc, ol, oc))
                 new_robots = tuple(sorted(new_robots, key=lambda x: x[0]))
-                new_state = (new_taps_f, plants_f, new_robots)
-                an = f"LOAD{{{rid}}}"
-                succs.append((an, new_state))
+                succs.append((f"LOAD{{{rid}}}", (new_taps_f, plants_f, new_robots)))
 
-            # POUR
-            if (r, c) in plants and plants[(r, c)] > 0 and load > 0:
+        # POUR actions
+        for rid, (r, c, load, cap) in robots.items():
+            if (r, c) in plants and load > 0 and plants[(r, c)] > 0:
                 new_plants = dict(plants)
-                new_plants[(r, c)] = new_plants[(r, c)] - 1
+                new_plants[(r, c)] -= 1
                 new_plants_f = tuple(sorted(new_plants.items()))
                 new_robots = []
                 for orid, orr, orc, ol, oc in robots_t:
@@ -160,9 +161,76 @@ class WateringProblem(search.Problem):
                     else:
                         new_robots.append((orid, orr, orc, ol, oc))
                 new_robots = tuple(sorted(new_robots, key=lambda x: x[0]))
-                new_state = (taps_f, new_plants_f, new_robots)
-                an = f"POUR{{{rid}}}"
-                succs.append((an, new_state))
+                succs.append((f"POUR{{{rid}}}", (taps_f, new_plants_f, new_robots)))
+
+        # ---- MOVETO macros: one per (robot, target) where target in taps|plants ----
+        # Conservative: only create macro when complete shortest path exists and all path cells (except src) are currently free.
+        targets = list(self.tap_positions) + list(self.plant_positions)
+        for rid, (r, c, load, cap) in robots.items():
+            src = (r, c)
+            for tgt in targets:
+                if src == tgt:
+                    continue
+                # get precomputed distance from src to tgt
+                dmap_src = self.dist_map.get(src)
+                if not dmap_src:
+                    continue
+                dist_to_tgt = dmap_src.get(tgt)
+                if dist_to_tgt is None:
+                    continue  # unreachable
+
+                # reconstruct shortest path greedily using dist_map: step to neighbor that reduces distance by 1
+                path_cells = []
+                cur = src
+                steps = 0
+                blocked = False
+                while cur != tgt:
+                    cur_dist_map = self.dist_map.get(cur, {})
+                    cur_to_tgt = cur_dist_map.get(tgt)
+                    if cur_to_tgt is None:
+                        blocked = True
+                        break
+                    # find neighbor with dist = cur_to_tgt - 1
+                    found_next = None
+                    for nb in self.neighbors.get(cur, []):
+                        nb_dist = self.dist_map.get(nb, {}).get(tgt)
+                        if nb_dist is not None and nb_dist == cur_to_tgt - 1:
+                            found_next = nb
+                            break
+                    if found_next is None:
+                        blocked = True
+                        break
+                    path_cells.append(found_next)
+                    cur = found_next
+                    steps += 1
+                    if steps > len(self.free_cells):
+                        blocked = True
+                        break
+                if blocked or steps <= 1:
+                    # skip if unreachable or single-step (we already add single-step primitives)
+                    continue
+
+                # check occupancy of entire path excluding source (conservative)
+                occupied_block = False
+                for cell in path_cells:
+                    if cell in occupied and cell != src:
+                        occupied_block = True
+                        break
+                if occupied_block:
+                    continue
+
+                # produce macro action string encoding steps so path_cost can charge it
+                action = f"MOVETO{{{rid}}}:{steps}:{tgt[0]},{tgt[1]}"
+                # create new state with robot at target (no change to taps/plants)
+                new_robots = []
+                for orid, orr, orc, ol, oc in robots_t:
+                    if orid == rid:
+                        new_robots.append((orid, tgt[0], tgt[1], ol, oc))
+                    else:
+                        new_robots.append((orid, orr, orc, ol, oc))
+                new_robots = tuple(sorted(new_robots, key=lambda x: x[0]))
+                new_state = (taps_f, plants_f, new_robots)
+                succs.append((action, new_state))
 
         return succs
 
@@ -276,8 +344,17 @@ class WateringProblem(search.Problem):
         return int(h)
 
     def path_cost(self, c, state1, action, state2):
-        """Support multi-step MOVETO actions by using their step count as cost."""
-        return c + 1
+        """Charge MOVETO macros by their encoded step-count; primitives cost 1."""
+        if isinstance(action, str) and action.startswith("MOVETO"):
+            try:
+                # format: MOVETO{rid}:<steps>:r,c
+                parts = action.split(":", 2)
+                steps = int(parts[1])
+                return c + steps
+            except Exception:
+                return c + 1
+        else:
+            return c + 1
 
 
 def create_watering_problem(game):
