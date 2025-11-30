@@ -1,13 +1,9 @@
-import ex1_check
 import search
 import utils
 import math
 from collections import deque
-import time
 
-# Student ID placeholder (set your id as requested by the assignment)
-id = ["No numbers - I'm special!"]
-
+id = "208018853"
 
 class WateringProblem(search.Problem):
     """Plant watering problem.
@@ -21,9 +17,7 @@ class WateringProblem(search.Problem):
     def __init__(self, initial):
         # Performance stats
         self.succ_calls = 0
-        self.succ_time = 0
         self.h_calls = 0
-        self.h_time = 0
         
         # parse input dict
         size = tuple(initial['Size'])
@@ -103,7 +97,6 @@ class WateringProblem(search.Problem):
 
     def successor(self, state):
         self.succ_calls += 1
-        start_time = time.time()
         
         taps_f, plants_f, robots_t = state
         taps = dict(taps_f)
@@ -177,9 +170,6 @@ class WateringProblem(search.Problem):
                 an = f"POUR{{{rid}}}"
                 succs.append((an, new_state))
 
-        end_time = time.time()
-        self.succ_time += (end_time - start_time)
-        
         return succs
 
     def goal_test(self, state):
