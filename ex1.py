@@ -228,13 +228,12 @@ class WateringProblem(search.Problem):
             if not tap_positions and needed_load > 0:
                 return 10**9 # Unsolvable
             
-            # Calculate distance from each demand unit to the nearest tap
-            # We expand the demand into individual units
-            demand_dists = []
-            active_plants = []
+            # Expand demands into individual units with their locations
+            # List of (dist_to_tap, dist_to_robot)
+            unit_demands = []
+            
             for ppos, pdemand in plants.items():
                 if pdemand <= 0: continue
-                active_plants.append(ppos)
                 
                 # Dist to nearest tap
                 d_tap = float('inf')
@@ -247,60 +246,96 @@ class WateringProblem(search.Problem):
                 if d_tap == float('inf'):
                     return 10**9
                 
-                # Add d_tap for each unit of demand
-                demand_dists.extend([d_tap] * pdemand)
+                d_robot = self.dist(r_pos, ppos)
+                
+                # Add for each unit of demand
+                unit_demands.extend([(d_tap, d_robot)] * pdemand)
             
-            # Sort demand distances descending (furthest first)
-            demand_dists.sort(reverse=True)
+            if not unit_demands:
+                return 0
+
+            # Helper to calculate Batch Cost for a set of demands (given by their dist_to_tap)
+            def calculate_batch_cost(dists_tap):
+                if not dists_tap: return 0
+                
+                # Sort once
+                d_asc = sorted(dists_tap)
+                
+                # Option 1: Ascending
+                sum_asc = 0
+                for i in range(0, len(d_asc), r_cap):
+                    sum_asc += d_asc[i:i+r_cap][-1]
+                
+                # Option 2: Descending
+                # Equivalent to taking chunks from the end of the sorted array
+                sum_desc = 0
+                n = len(d_asc)
+                for i in range(n, 0, -r_cap):
+                    sum_desc += d_asc[i-1]
+                
+                best_sum = min(sum_asc, sum_desc)
+                
+                # Cost is 2 * sum(maxes) - max(all_dists)
+                return 2 * best_sum - d_asc[-1]
+
+            # Strategy 1: Go to Tap first (Fill up / Dump)
+            # Cost = Dist(Robot, Tap) + BatchCost(All Demands)
+            # We need dist to nearest tap
+            d_robot_tap = float('inf')
+            for tpos in tap_positions:
+                d = self.dist(r_pos, tpos)
+                if d < d_robot_tap:
+                    d_robot_tap = d
             
-            # The current load satisfies the 'r_load' most expensive units (furthest from tap)
-            # This is an admissible assumption (best case)
-            remaining_demands = demand_dists[r_load:]
+            all_dists_tap = [u[0] for u in unit_demands]
+            cost_go_tap = d_robot_tap + calculate_batch_cost(all_dists_tap)
             
-            if not remaining_demands:
-                # We have enough load to satisfy all demands.
-                # We just need to deliver.
-                # Lower bound: distance to the furthest active plant
-                # (Since we must visit all of them, and we are at r_pos)
-                max_dist = 0
-                for ppos in active_plants:
-                    d = self.dist(r_pos, ppos)
-                    if d > max_dist:
-                        max_dist = d
-                h_move = max_dist
-            else:
-                # We need to fetch more water.
-                # Sort remaining demands ascending (closest first) for batching?
-                # Actually, for the batches, we pay 2 * max(batch).
-                # To minimize sum(2*max(batch)), we should group sorted items.
-                # e.g. 1, 2, 10, 11. Cap 2.
-                # (1,2) -> 4. (10,11) -> 22. Total 26.
-                # (1,11) -> 22. (2,10) -> 20. Total 42.
-                # So sorting is correct.
-                remaining_demands.sort()
+            # Strategy 2: Deliver current load first
+            # We can only do this if we have load
+            cost_deliver = float('inf')
+            
+            if r_load > 0:
+                # We need to choose WHICH r_load units to deliver.
+                # We try two heuristics:
+                # A. Deliver the ones furthest from Tap (Maximize batch savings)
+                # B. Deliver the ones closest to Robot (Minimize detour)
                 
-                batches = []
-                for i in range(0, len(remaining_demands), r_cap):
-                    batches.append(remaining_demands[i:i+r_cap])
+                # Sort by dist_tap descending
+                unit_demands.sort(key=lambda x: x[0], reverse=True)
+                s_furthest = unit_demands[:r_load]
+                r_furthest = [u[0] for u in unit_demands[r_load:]]
                 
-                batch_cost = 0
-                for b in batches:
-                    # Trip: Tap -> Furthest in batch -> Tap
-                    batch_cost += 2 * b[-1] # b is sorted, last is max
+                # Sort by dist_robot ascending
+                unit_demands.sort(key=lambda x: x[1])
+                s_closest = unit_demands[:r_load]
+                r_closest = [u[0] for u in unit_demands[r_load:]]
                 
-                # The last trip does not need to return to Tap
-                if batches:
-                    batch_cost -= batches[-1][-1]
-                
-                # Plus distance from Robot to Tap (to start the fetching)
-                # If loaded, r_pos -> Tap is lower bound for r_pos -> Plant -> Tap
-                d_robot_tap = float('inf')
-                for tpos in tap_positions:
-                    d = self.dist(r_pos, tpos)
-                    if d < d_robot_tap:
-                        d_robot_tap = d
-                
-                h_move = batch_cost + d_robot_tap
+                for s_set, r_dists_tap in [(s_furthest, r_furthest), (s_closest, r_closest)]:
+                    # Cost = Visit S + (Go Tap if R not empty) + BatchCost(R)
+                    
+                    # Lower bound for visiting S: Max(dist(Robot, p))
+                    # If R is not empty, we must also go to Tap: Max(dist(Robot, p) + dist(p, Tap))
+                    
+                    if not r_dists_tap:
+                        # No remaining demands. Just deliver S.
+                        # Cost is max dist from robot to any p in S
+                        move_cost = 0
+                        for _, d_r in s_set:
+                            if d_r > move_cost: move_cost = d_r
+                    else:
+                        # Must go to tap after.
+                        # Lower bound: max(dist(Robot, p) + dist(p, Tap)) for p in S
+                        move_cost = 0
+                        for d_t, d_r in s_set:
+                            trip = d_r + d_t
+                            if trip > move_cost: move_cost = trip
+                        
+                        move_cost += calculate_batch_cost(r_dists_tap)
+                    
+                    if move_cost < cost_deliver:
+                        cost_deliver = move_cost
+
+            h_move = min(cost_go_tap, cost_deliver)
                 
             return int(h_actions + h_move)
 
