@@ -228,12 +228,16 @@ class WateringProblem(search.Problem):
             if not tap_positions and needed_load > 0:
                 return 10**9 # Unsolvable
             
-            # Expand demands into individual units with their locations
-            # List of (dist_to_tap, dist_to_robot)
-            unit_demands = []
-            
+            # Calculate distance from each demand unit to the nearest tap
+            # We expand the demand into individual units
+            demand_dists = []
+            active_plants = []
+            min_trip = float('inf')
+            max_dist_R_P = 0
+
             for ppos, pdemand in plants.items():
                 if pdemand <= 0: continue
+                active_plants.append(ppos)
                 
                 # Dist to nearest tap
                 d_tap = float('inf')
@@ -246,97 +250,61 @@ class WateringProblem(search.Problem):
                 if d_tap == float('inf'):
                     return 10**9
                 
-                d_robot = self.dist(r_pos, ppos)
+                # Add d_tap for each unit of demand
+                demand_dists.extend([d_tap] * pdemand)
+
+                # Track min trip (R -> P -> Tap) and max dist (R -> P)
+                d_R_P = self.dist(r_pos, ppos)
+                if d_R_P > max_dist_R_P:
+                    max_dist_R_P = d_R_P
                 
-                # Add for each unit of demand
-                unit_demands.extend([(d_tap, d_robot)] * pdemand)
+                trip = d_R_P + d_tap
+                if trip < min_trip:
+                    min_trip = trip
             
-            if not unit_demands:
-                return 0
+            # Sort demand distances descending (furthest first)
+            demand_dists.sort(reverse=True)
+            
+            # Helper for batch cost
+            def get_batch_cost(demands):
+                if not demands: return 0
+                d_desc = sorted(demands, reverse=True)
+                cost = d_desc[0]
+                remaining = d_desc[r_cap:]
+                if remaining:
+                    rem_asc = sorted(remaining)
+                    for i in range(0, len(rem_asc), r_cap):
+                        cost += 2 * rem_asc[i:i+r_cap][-1]
+                return cost
 
-            # Helper to calculate Batch Cost for a set of demands (given by their dist_to_tap)
-            def calculate_batch_cost(dists_tap):
-                if not dists_tap: return 0
-                
-                # Sort once
-                d_asc = sorted(dists_tap)
-                
-                # Option 1: Ascending
-                sum_asc = 0
-                for i in range(0, len(d_asc), r_cap):
-                    sum_asc += d_asc[i:i+r_cap][-1]
-                
-                # Option 2: Descending
-                # Equivalent to taking chunks from the end of the sorted array
-                sum_desc = 0
-                n = len(d_asc)
-                for i in range(n, 0, -r_cap):
-                    sum_desc += d_asc[i-1]
-                
-                best_sum = min(sum_asc, sum_desc)
-                
-                # Cost is 2 * sum(maxes) - max(all_dists)
-                return 2 * best_sum - d_asc[-1]
-
-            # Strategy 1: Go to Tap first (Fill up / Dump)
-            # Cost = Dist(Robot, Tap) + BatchCost(All Demands)
-            # We need dist to nearest tap
+            # Option 1: Dump load at Tap (or just go to Tap)
             d_robot_tap = float('inf')
             for tpos in tap_positions:
                 d = self.dist(r_pos, tpos)
                 if d < d_robot_tap:
                     d_robot_tap = d
             
-            all_dists_tap = [u[0] for u in unit_demands]
-            cost_go_tap = d_robot_tap + calculate_batch_cost(all_dists_tap)
+            h_dump = d_robot_tap + get_batch_cost(demand_dists)
             
-            # Strategy 2: Deliver current load first
-            # We can only do this if we have load
-            cost_deliver = float('inf')
+            # Option 2: Deliver to k plants (1 <= k <= r_load)
+            h_del = float('inf')
             
-            if r_load > 0:
-                # We need to choose WHICH r_load units to deliver.
-                # We try two heuristics:
-                # A. Deliver the ones furthest from Tap (Maximize batch savings)
-                # B. Deliver the ones closest to Robot (Minimize detour)
-                
-                # Sort by dist_tap descending
-                unit_demands.sort(key=lambda x: x[0], reverse=True)
-                s_furthest = unit_demands[:r_load]
-                r_furthest = [u[0] for u in unit_demands[r_load:]]
-                
-                # Sort by dist_robot ascending
-                unit_demands.sort(key=lambda x: x[1])
-                s_closest = unit_demands[:r_load]
-                r_closest = [u[0] for u in unit_demands[r_load:]]
-                
-                for s_set, r_dists_tap in [(s_furthest, r_furthest), (s_closest, r_closest)]:
-                    # Cost = Visit S + (Go Tap if R not empty) + BatchCost(R)
-                    
-                    # Lower bound for visiting S: Max(dist(Robot, p))
-                    # If R is not empty, we must also go to Tap: Max(dist(Robot, p) + dist(p, Tap))
-                    
-                    if not r_dists_tap:
-                        # No remaining demands. Just deliver S.
-                        # Cost is max dist from robot to any p in S
-                        move_cost = 0
-                        for _, d_r in s_set:
-                            if d_r > move_cost: move_cost = d_r
+            if len(demand_dists) <= r_load:
+                h_del = max_dist_R_P
+            else:
+                # Try delivering k items first
+                for k in range(1, r_load + 1):
+                    rem = demand_dists[k:]
+                    if not rem:
+                        cost = max_dist_R_P
                     else:
-                        # Must go to tap after.
-                        # Lower bound: max(dist(Robot, p) + dist(p, Tap)) for p in S
-                        move_cost = 0
-                        for d_t, d_r in s_set:
-                            trip = d_r + d_t
-                            if trip > move_cost: move_cost = trip
-                        
-                        move_cost += calculate_batch_cost(r_dists_tap)
+                        cost = min_trip + get_batch_cost(rem)
                     
-                    if move_cost < cost_deliver:
-                        cost_deliver = move_cost
+                    if cost < h_del:
+                        h_del = cost
+            
+            h_move = min(h_dump, h_del)
 
-            h_move = min(cost_go_tap, cost_deliver)
-                
             return int(h_actions + h_move)
 
         # 2. Movement Costs (Relaxation) - Multi Robot
@@ -424,28 +392,79 @@ class WateringProblem(search.Problem):
             if min_fetch != float('inf'):
                 h_move += min_fetch
 
+        if h_actions == float('inf') or h_move == float('inf'):
+            return float('inf')
         return int(h_actions + h_move)
 
     def h_gbfs(self, node):
-        """Greedy heuristic: sum distance from nearest robot to plants plus demand"""
+        """Greedy heuristic: sum distance from nearest robot to plants plus demand.
+        Improved to account for empty robots needing to visit a tap first.
+        For single robot, delegates to the more accurate A* heuristic.
+        """
         state = node.state
-        taps_f, plants_f, robots_t = state
+        _, _, robots_t = state
+        
+        # Use the advanced heuristic for single robot (Problem 17 optimization)
+        if len(robots_t) == 1:
+            return self._h_astar_impl(node)
+
+        taps_f, plants_f, _ = state
         plants = dict(plants_f)
-        robots = [(r, c) for (_, r, c, _, _) in robots_t]
+        taps = dict(taps_f)
+        
+        # Precompute active taps
+        active_taps = [pos for pos, amt in taps.items() if amt > 0]
+        
         h = 0
         for ppos, pd in plants.items():
             if pd <= 0:
                 continue
-            if not robots:
-                dmin = 0
+            
+            min_dist = float('inf')
+            
+            if not robots_t:
+                min_dist = 0
             else:
-                dmin = min(self.dist(rpos, ppos) for rpos in robots)
-                if dmin == float('inf'):
-                    dmin = 0
-            h += dmin + pd
+                for _, r_r, r_c, r_load, _ in robots_t:
+                    rpos = (r_r, r_c)
+                    if r_load > 0:
+                        # Robot has water, can go directly
+                        d = self.dist(rpos, ppos)
+                        if d < min_dist:
+                            min_dist = d
+                    else:
+                        # Robot empty, must go R -> Tap -> Plant
+                        # Estimate as: dist(R, nearest_Tap) + dist(nearest_Tap, P)
+                        
+                        # 1. Dist to nearest tap
+                        d_r_t = float('inf')
+                        for tpos in active_taps:
+                            d = self.dist(rpos, tpos)
+                            if d < d_r_t:
+                                d_r_t = d
+                        
+                        # 2. Dist from nearest tap to plant
+                        d_t_p = float('inf')
+                        for tpos in active_taps:
+                            d = self.tap_plant_dist.get((tpos, ppos))
+                            if d is None: d = self.dist(tpos, ppos)
+                            if d < d_t_p:
+                                d_t_p = d
+                                
+                        if d_r_t != float('inf') and d_t_p != float('inf'):
+                            trip = d_r_t + d_t_p
+                            if trip < min_dist:
+                                min_dist = trip
+            
+            if min_dist == float('inf'):
+                min_dist = 0
+                
+            h += min_dist + pd
+            
         return int(h)
 
     def h_astar(self, node):
+        self.h_calls += 1
         return self._h_astar_impl(node)
 
 
