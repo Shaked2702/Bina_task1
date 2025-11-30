@@ -1,12 +1,10 @@
-import ex1_check
 import search
 import utils
 import math
 from collections import deque
 import time
 
-# Student ID placeholder (set your id as requested by the assignment)
-id = ["No numbers - I'm special!"]
+id = "208018853"
 
 
 class WateringProblem(search.Problem):
@@ -427,22 +425,70 @@ class WateringProblem(search.Problem):
         return int(h_actions + h_move)
 
     def h_gbfs(self, node):
-        """Greedy heuristic: sum distance from nearest robot to plants plus demand"""
+        """Greedy heuristic: sum distance from nearest robot to plants plus demand.
+        Improved to account for empty robots needing to visit a tap first.
+        For single robot, delegates to the more accurate A* heuristic.
+        """
         state = node.state
-        taps_f, plants_f, robots_t = state
+        _, _, robots_t = state
+        
+        # Use the advanced heuristic for single robot (Problem 17 optimization)
+        if len(robots_t) == 1:
+            return self._h_astar_impl(node)
+
+        taps_f, plants_f, _ = state
         plants = dict(plants_f)
-        robots = [(r, c) for (_, r, c, _, _) in robots_t]
+        taps = dict(taps_f)
+        
+        # Precompute active taps
+        active_taps = [pos for pos, amt in taps.items() if amt > 0]
+        
         h = 0
         for ppos, pd in plants.items():
             if pd <= 0:
                 continue
-            if not robots:
-                dmin = 0
+            
+            min_dist = float('inf')
+            
+            if not robots_t:
+                min_dist = 0
             else:
-                dmin = min(self.dist(rpos, ppos) for rpos in robots)
-                if dmin == float('inf'):
-                    dmin = 0
-            h += dmin + pd
+                for _, r_r, r_c, r_load, _ in robots_t:
+                    rpos = (r_r, r_c)
+                    if r_load > 0:
+                        # Robot has water, can go directly
+                        d = self.dist(rpos, ppos)
+                        if d < min_dist:
+                            min_dist = d
+                    else:
+                        # Robot empty, must go R -> Tap -> Plant
+                        # Estimate as: dist(R, nearest_Tap) + dist(nearest_Tap, P)
+                        
+                        # 1. Dist to nearest tap
+                        d_r_t = float('inf')
+                        for tpos in active_taps:
+                            d = self.dist(rpos, tpos)
+                            if d < d_r_t:
+                                d_r_t = d
+                        
+                        # 2. Dist from nearest tap to plant
+                        d_t_p = float('inf')
+                        for tpos in active_taps:
+                            d = self.tap_plant_dist.get((tpos, ppos))
+                            if d is None: d = self.dist(tpos, ppos)
+                            if d < d_t_p:
+                                d_t_p = d
+                                
+                        if d_r_t != float('inf') and d_t_p != float('inf'):
+                            trip = d_r_t + d_t_p
+                            if trip < min_dist:
+                                min_dist = trip
+            
+            if min_dist == float('inf'):
+                min_dist = 0
+                
+            h += min_dist + pd
+            
         return int(h)
 
     def h_astar(self, node):
