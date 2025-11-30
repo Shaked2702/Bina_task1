@@ -3,7 +3,7 @@ import search
 import utils
 import math
 from collections import deque
-import search
+import time
 
 # Student ID placeholder (set your id as requested by the assignment)
 id = ["No numbers - I'm special!"]
@@ -19,6 +19,12 @@ class WateringProblem(search.Problem):
     """
 
     def __init__(self, initial):
+        # Performance stats
+        self.succ_calls = 0
+        self.succ_time = 0
+        self.h_calls = 0
+        self.h_time = 0
+        
         # parse input dict
         size = tuple(initial['Size'])
         self.size = size
@@ -92,45 +98,48 @@ class WateringProblem(search.Problem):
             return float('inf')
         return self.dist_map.get(src, {}).get(dst, float('inf'))
 
+    def path_cost(self, c, state1, action, state2):
+        return c + 1
+
     def successor(self, state):
-        """Generate successors: list of (action_str, next_state)
-        Actions: UP{rid}, DOWN{rid}, LEFT{rid}, RIGHT{rid}, LOAD{rid}, POUR{rid}
-        Exactly one robot moves per step.
-        """
+        self.succ_calls += 1
+        start_time = time.time()
+        
         taps_f, plants_f, robots_t = state
         taps = dict(taps_f)
         plants = dict(plants_f)
-        robots = {rid: [r, c, load, cap] for (rid, r, c, load, cap) in robots_t}
-
-        occupied = {(r, c) for (_, r, c, _, _) in robots_t}
-
+        
         succs = []
-
-        # movement actions
-        for rid, (r, c, load, cap) in robots.items():
-            for nb in self.neighbors.get((r, c), []):
-                if nb in occupied and nb != (r, c):
-                    continue
-                nr, nc = nb
-                # create new robots tuple
-                new_robots = []
-                for orid, orr, orc, ol, oc in robots_t:
-                    if orid == rid:
-                        new_robots.append((orid, nr, nc, ol, oc))
+        
+        # 1. MOVE
+        # Try all 4 directions for each robot
+        for rid, r, c, load, cap in robots_t:
+            # Check if other robots are blocking
+            # We need to know positions of all other robots
+            other_robots_pos = { (or_r, or_c) for (orid, or_r, or_c, _, _) in robots_t if orid != rid }
+            
+            for dr, dc, name in [(-1, 0, 'UP'), (1, 0, 'DOWN'), (0, -1, 'LEFT'), (0, 1, 'RIGHT')]:
+                nr, nc = r + dr, c + dc
+                if (nr, nc) in self.free_cells and (nr, nc) not in other_robots_pos:
+                    # Valid move
+                    new_robots = []
+                    for orid, orr, orc, ol, oc in robots_t:
+                        if orid == rid:
+                            new_robots.append((orid, nr, nc, ol, oc))
+                        else:
+                            new_robots.append((orid, orr, orc, ol, oc))
+                    new_robots = tuple(sorted(new_robots, key=lambda x: x[0]))
+                    new_state = (taps_f, plants_f, new_robots)
+                    dr, dc = nr - r, nc - c
+                    if (dr, dc) == (-1, 0):
+                        an = f"UP{{{rid}}}"
+                    elif (dr, dc) == (1, 0):
+                        an = f"DOWN{{{rid}}}"
+                    elif (dr, dc) == (0, -1):
+                        an = f"LEFT{{{rid}}}"
                     else:
-                        new_robots.append((orid, orr, orc, ol, oc))
-                new_robots = tuple(sorted(new_robots, key=lambda x: x[0]))
-                new_state = (taps_f, plants_f, new_robots)
-                dr, dc = nr - r, nc - c
-                if (dr, dc) == (-1, 0):
-                    an = f"UP{{{rid}}}"
-                elif (dr, dc) == (1, 0):
-                    an = f"DOWN{{{rid}}}"
-                elif (dr, dc) == (0, -1):
-                    an = f"LEFT{{{rid}}}"
-                else:
-                    an = f"RIGHT{{{rid}}}"
-                succs.append((an, new_state))
+                        an = f"RIGHT{{{rid}}}"
+                    succs.append((an, new_state))
 
             # LOAD
             if (r, c) in taps and taps[(r, c)] > 0 and load < cap:
@@ -168,22 +177,25 @@ class WateringProblem(search.Problem):
                 an = f"POUR{{{rid}}}"
                 succs.append((an, new_state))
 
+        end_time = time.time()
+        self.succ_time += (end_time - start_time)
+        
         return succs
 
     def goal_test(self, state):
         _, plants_f, _ = state
         return len(plants_f) == 0
 
-    def h_astar(self, node):
+    def _h_astar_impl(self, node):
         """Admissible heuristic: Work / Capacity relaxation.
         
         1. Action costs: We need 1 POUR per unit of demand.
            We need 1 LOAD per unit of demand that isn't currently loaded.
         2. Movement costs:
-           Calculate 'transport work' = sum(dist(Source, Plant) * Demand).
-           Source is the closest loaded robot OR closest tap.
-           Divide total work by Max_Capacity to account for batching.
-           If we need to fetch water (Load < Demand), add min dist(Robot, Tap).
+           Calculate 'transport work' = sum(dist(Source, Plant) * Amount).
+           We greedily assign the cheapest available water units (from taps or loaded robots)
+           to each plant's demand, respecting the limited amount of water in each source.
+           This provides a tighter lower bound than assuming infinite water at the nearest tap.
         """
         state = node.state
         taps_f, plants_f, robots_t = state
@@ -205,53 +217,156 @@ class WateringProblem(search.Problem):
         needed_load = max(0, total_demand - total_load)
         h_actions += needed_load
         
-        # 2. Movement Costs (Relaxation)
-        # We calculate the minimal "distance units" the water must travel.
-        # For each unit of demand at a plant, it must come from somewhere.
-        # If we have loaded robots, they are sources. Taps are also sources.
-        # We take the optimistic view that any source can supply any plant.
+        # Single Robot Optimization
+        if len(robots_t) == 1:
+            robot = robots_t[0]
+            rid, r_r, r_c, r_load, r_cap = robot
+            r_pos = (r_r, r_c)
+            
+            # Identify tap positions
+            tap_positions = [pos for pos, amt in taps.items() if amt > 0]
+            if not tap_positions and needed_load > 0:
+                return 10**9 # Unsolvable
+            
+            # Calculate distance from each demand unit to the nearest tap
+            # We expand the demand into individual units
+            demand_dists = []
+            active_plants = []
+            for ppos, pdemand in plants.items():
+                if pdemand <= 0: continue
+                active_plants.append(ppos)
+                
+                # Dist to nearest tap
+                d_tap = float('inf')
+                for tpos in tap_positions:
+                    d = self.tap_plant_dist.get((tpos, ppos))
+                    if d is None: d = self.dist(tpos, ppos)
+                    if d < d_tap:
+                        d_tap = d
+                
+                if d_tap == float('inf'):
+                    return 10**9
+                
+                # Add d_tap for each unit of demand
+                demand_dists.extend([d_tap] * pdemand)
+            
+            # Sort demand distances descending (furthest first)
+            demand_dists.sort(reverse=True)
+            
+            # The current load satisfies the 'r_load' most expensive units (furthest from tap)
+            # This is an admissible assumption (best case)
+            remaining_demands = demand_dists[r_load:]
+            
+            if not remaining_demands:
+                # We have enough load to satisfy all demands.
+                # We just need to deliver.
+                # Lower bound: distance to the furthest active plant
+                # (Since we must visit all of them, and we are at r_pos)
+                max_dist = 0
+                for ppos in active_plants:
+                    d = self.dist(r_pos, ppos)
+                    if d > max_dist:
+                        max_dist = d
+                h_move = max_dist
+            else:
+                # We need to fetch more water.
+                # Sort remaining demands ascending (closest first) for batching?
+                # Actually, for the batches, we pay 2 * max(batch).
+                # To minimize sum(2*max(batch)), we should group sorted items.
+                # e.g. 1, 2, 10, 11. Cap 2.
+                # (1,2) -> 4. (10,11) -> 22. Total 26.
+                # (1,11) -> 22. (2,10) -> 20. Total 42.
+                # So sorting is correct.
+                remaining_demands.sort()
+                
+                batches = []
+                for i in range(0, len(remaining_demands), r_cap):
+                    batches.append(remaining_demands[i:i+r_cap])
+                
+                batch_cost = 0
+                for b in batches:
+                    # Trip: Tap -> Furthest in batch -> Tap
+                    batch_cost += 2 * b[-1] # b is sorted, last is max
+                
+                # The last trip does not need to return to Tap
+                if batches:
+                    batch_cost -= batches[-1][-1]
+                
+                # Plus distance from Robot to Tap (to start the fetching)
+                # If loaded, r_pos -> Tap is lower bound for r_pos -> Plant -> Tap
+                d_robot_tap = float('inf')
+                for tpos in tap_positions:
+                    d = self.dist(r_pos, tpos)
+                    if d < d_robot_tap:
+                        d_robot_tap = d
+                
+                h_move = batch_cost + d_robot_tap
+                
+            return int(h_actions + h_move)
+
+        # 2. Movement Costs (Relaxation) - Multi Robot
+        transport_work = 0
         
-        loaded_robot_positions = [(r, c) for (_, r, c, load, _) in robots_t if load > 0]
-        tap_positions = [pos for pos, amt in taps.items() if amt > 0]
+        # Identify all water sources
+        # Robots with load
+        robot_sources = []
+        for (_, r, c, load, _) in robots_t:
+            if load > 0:
+                robot_sources.append(((r, c), load))
+                
+        # Taps with water
+        tap_sources = []
+        for tpos, amt in taps.items():
+            if amt > 0:
+                tap_sources.append((tpos, amt))
         
-        # If no water sources available at all (and we need water), return infinity
-        if not tap_positions and not loaded_robot_positions and total_demand > 0:
+        # If no water available and we have demand, it's unsolvable
+        if not tap_sources and not robot_sources and total_demand > 0:
              return 10**9
 
-        transport_work = 0
         for ppos, pdemand in plants.items():
             if pdemand <= 0: continue
             
-            # Distance from nearest tap
-            dist_tap = float('inf')
-            if tap_positions:
-                # Use cached tap_plant_dist if available, else direct lookup
-                dist_tap = min(self.tap_plant_dist.get((t, ppos), self.dist(t, ppos)) 
-                             for t in tap_positions)
+            # Collect (distance, amount) for all sources relative to this plant
+            sources = []
             
-            # Distance from nearest loaded robot
-            dist_robot = float('inf')
-            if loaded_robot_positions:
-                dist_robot = min(self.dist(r, ppos) for r in loaded_robot_positions)
+            # Taps
+            for tpos, amt in tap_sources:
+                # Use cached distance if available
+                dist = self.tap_plant_dist.get((tpos, ppos))
+                if dist is None:
+                    dist = self.dist(tpos, ppos)
+                sources.append((dist, amt))
                 
-            # Optimistic: take the better of the two sources
-            # (If we have load, we can use it. If not, we must use tap)
-            # But we can't use robot source if we don't have load...
-            # However, we are aggregating total work.
-            # If we have L units of load, we can save L * (dist_tap - dist_robot) work?
-            # Simpler admissible bound:
-            # Assume all current load is magically at the BEST position for the demands.
-            # Actually, just use dist_tap for ALL demand, because eventually water comes from taps.
-            # Unless it's already in a robot closer than the tap.
+            # Robots
+            for rpos, load in robot_sources:
+                dist = self.dist(rpos, ppos)
+                sources.append((dist, load))
             
-            cost_per_unit = dist_tap
-            if loaded_robot_positions:
-                cost_per_unit = min(cost_per_unit, dist_robot)
+            # Sort by distance (cheapest water first)
+            sources.sort(key=lambda x: x[0])
+            
+            remaining_demand = pdemand
+            plant_transport_cost = 0
+            
+            for dist, amt in sources:
+                if dist == float('inf'): continue
                 
-            if cost_per_unit == float('inf'):
+                take = min(remaining_demand, amt)
+                plant_transport_cost += take * dist
+                remaining_demand -= take
+                
+                if remaining_demand == 0:
+                    break
+            
+            # If we exhausted all sources and still have demand, this plant cannot be fully watered
+            # (in this relaxed view where we don't compete with other plants).
+            # However, since we check this per plant, and we know total water > total demand is not guaranteed globally here,
+            # we should be careful. But if a single plant can't be satisfied by *all* world water, it's definitely unsolvable.
+            if remaining_demand > 0:
                 return 10**9
                 
-            transport_work += cost_per_unit * pdemand
+            transport_work += plant_transport_cost
 
         # Divide by max capacity because one robot can carry multiple units
         h_move = math.ceil(transport_work / max_cap)
@@ -262,6 +377,7 @@ class WateringProblem(search.Problem):
             # Min dist from any robot to any tap
             min_fetch = float('inf')
             robot_positions = [(r, c) for (_, r, c, _, _) in robots_t]
+            tap_positions = [pos for pos, amt in taps.items() if amt > 0]
             if robot_positions and tap_positions:
                 # This can be optimized, but N is small
                 for rpos in robot_positions:
@@ -272,7 +388,7 @@ class WateringProblem(search.Problem):
             
             if min_fetch != float('inf'):
                 h_move += min_fetch
-                
+
         return int(h_actions + h_move)
 
     def h_gbfs(self, node):
@@ -294,9 +410,8 @@ class WateringProblem(search.Problem):
             h += dmin + pd
         return int(h)
 
-    def path_cost(self, c, state1, action, state2):
-        """Support multi-step MOVETO actions by using their step count as cost."""
-        return c + 1
+    def h_astar(self, node):
+        return self._h_astar_impl(node)
 
 
 def create_watering_problem(game):
