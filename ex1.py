@@ -14,6 +14,7 @@ class WateringProblem(search.Problem):
       - robots_tuple: tuple of (rid, r, c, load, cap) sorted by rid
     """
 
+    # Initialize the problem, parsing the input dictionary and precomputing distances.
     def __init__(self, initial):
         # Performance stats
         self.succ_calls = 0
@@ -72,6 +73,7 @@ class WateringProblem(search.Problem):
         # finalize
         search.Problem.__init__(self, state)
 
+    # Perform BFS from a source cell to all reachable cells to compute distances.
     def _bfs_from(self, source):
         dist = {cell: float('inf') for cell in self.free_cells}
         if source not in self.free_cells:
@@ -86,15 +88,18 @@ class WateringProblem(search.Problem):
                     q.append(nb)
         return dist
 
+    # Return the precomputed distance between two cells (O(1) lookup).
     def dist(self, src, dst):
         """O(1) distance lookup between free cells; walls return inf."""
         if src not in self.free_cells or dst not in self.free_cells:
             return float('inf')
         return self.dist_map.get(src, {}).get(dst, float('inf'))
 
+    # Return the cost of an action (always 1 in this problem).
     def path_cost(self, c, state1, action, state2):
         return c + 1
 
+    # Generate all valid successor states from the current state.
     def successor(self, state):
         self.succ_calls += 1
         
@@ -172,10 +177,12 @@ class WateringProblem(search.Problem):
 
         return succs
 
+    # Check if the goal is reached (all plants have 0 demand).
     def goal_test(self, state):
         _, plants_f, _ = state
         return len(plants_f) == 0
 
+    # Implementation of the admissible heuristic using relaxation and single-robot optimization.
     def _h_astar_impl(self, node):
         """Admissible heuristic: Work / Capacity relaxation.
         
@@ -386,6 +393,7 @@ class WateringProblem(search.Problem):
             return float('inf')
         return int(h_actions + h_move)
 
+    # Greedy heuristic: prioritizes visiting taps if empty, then delivering to plants.
     def h_gbfs(self, node):
         """Greedy heuristic: sum distance from nearest robot to plants plus demand.
         Improved to account for empty robots needing to visit a tap first.
@@ -453,11 +461,13 @@ class WateringProblem(search.Problem):
             
         return int(h)
 
+    # Wrapper for the A* heuristic function.
     def h_astar(self, node):
         self.h_calls += 1
         return self._h_astar_impl(node)
 
 
+# Factory function to create a WateringProblem instance from the input dictionary.
 def create_watering_problem(game):
     print("<<create_watering_problem")
     return WateringProblem(game)
