@@ -136,6 +136,8 @@ class WateringProblem(search.Problem):
             if (r, c) in taps and taps[(r, c)] > 0 and load < cap:
                 new_taps = dict(taps)
                 new_taps[(r, c)] = new_taps[(r, c)] - 1
+                if new_taps[(r, c)] == 0:
+                    del new_taps[(r, c)]
                 new_taps_f = tuple(sorted(new_taps.items()))
                 new_robots = []
                 for orid, orr, orc, ol, oc in robots_t:
@@ -152,6 +154,8 @@ class WateringProblem(search.Problem):
             if (r, c) in plants and plants[(r, c)] > 0 and load > 0:
                 new_plants = dict(plants)
                 new_plants[(r, c)] = new_plants[(r, c)] - 1
+                if new_plants[(r, c)] == 0:
+                    del new_plants[(r, c)]
                 new_plants_f = tuple(sorted(new_plants.items()))
                 new_robots = []
                 for orid, orr, orc, ol, oc in robots_t:
@@ -168,8 +172,7 @@ class WateringProblem(search.Problem):
 
     def goal_test(self, state):
         _, plants_f, _ = state
-        plants = dict(plants_f)
-        return all(v == 0 for v in plants.values())
+        return len(plants_f) == 0
 
     def h_astar(self, node):
         """Admissible heuristic: Work / Capacity relaxation.
