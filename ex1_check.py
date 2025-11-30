@@ -2,7 +2,7 @@ import time
 
 import ex1
 import search
-
+import problems
 
 
 def run_problem(func, targs=(), kwargs=None):
@@ -28,17 +28,33 @@ def solve_problems(problem, algorithm):
         print("Error creating problem: ", e)
         return None
 
+    start_time = time.time()
     if algorithm == "gbfs":
         result = run_problem((lambda p: search.greedy_best_first_graph_search(p, p.h_gbfs)),targs=[p])
     else:
         result = run_problem((lambda p: search.astar_search(p, p.h_astar)), targs=[p])
+    end_time = time.time()
 
     if result and isinstance(result[0], search.Node):
         solve = result[0].path()[::-1]
-        solution = [pi.action for pi in solve][1:]
+        raw_solution = [pi.action for pi in solve][1:]
+        solution = []
+        for act in raw_solution:
+            if act.startswith("MOVETO"):
+                # Parse "MOVETO{rid}:steps:r,c;ACT1,ACT2..."
+                parts = act.split(";")
+                if len(parts) > 1:
+                    sub_actions = parts[1].split(",")
+                    solution.extend(sub_actions)
+                else:
+                    solution.append(parts[0])
+            else:
+                solution.append(act)
         print(len(solution), solution)
     else:
         print("no solution")
+    
+    print(f"Time taken: {end_time - start_time} seconds")
 
 
 
@@ -202,15 +218,35 @@ problem7 = {
 
 
 
-
-
-
 def main():
     start = time.time()
-    problem = []
-    for p in problem:
+    
+    # Basic problems defined in this file
+    basic_problems = [problem1, problem2, problem3, problem4, problem5_deadend, problem6, problem7]
+    
+    # Hard problems from problems.py
+    hard_problems = [
+        problems.problem_hard1,
+        problems.problem_hard2,
+        problems.problem_hard3,
+        problems.problem_hard4,
+        problems.problem_hard5,
+        problems.problem_hard6,
+        problems.problem_load,
+        problems.problem_10x10_single,
+        problems.problem_12x12_snake,
+        problems.problem_12x12_snake_hard
+    ]
+    
+    all_problems = basic_problems + hard_problems
+    
+    i = 1
+    for p in all_problems:
+        print(f"--- Problem {i} ---")
         for a in ['astar','gbfs']:
+            print(f"Algorithm: {a}")
             solve_problems(p, a)
+        i += 1
     end = time.time()
     print('Submission took:', end-start, 'seconds.')
 

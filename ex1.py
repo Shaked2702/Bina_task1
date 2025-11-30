@@ -172,89 +172,105 @@ class WateringProblem(search.Problem):
         return all(v == 0 for v in plants.values())
 
     def h_astar(self, node):
-        """Admissible heuristic per provided "Optimistic Trips" logic.
-
-        For each plant with demand>0 compute minimal trip cost across robots and sum.
-        Trip cost per robot->plant via best tap:
-          Effective_Capacity = min(robot_cap, total_water_remaining)
-          Required_Trips = ceil(plant_demand / Effective_Capacity)
-          Base_Cost = dist(robot, best_tap) + dist(best_tap, plant)
-          Return_Trip_Cost = (Required_Trips - 1) * 2 * dist(best_tap, plant)
-          Total = Base_Cost + Return_Trip_Cost
-        Add small +1 penalty if any other robot currently lies on a shortest path used.
+        """Admissible heuristic: Work / Capacity relaxation.
+        
+        1. Action costs: We need 1 POUR per unit of demand.
+           We need 1 LOAD per unit of demand that isn't currently loaded.
+        2. Movement costs:
+           Calculate 'transport work' = sum(dist(Source, Plant) * Demand).
+           Source is the closest loaded robot OR closest tap.
+           Divide total work by Max_Capacity to account for batching.
+           If we need to fetch water (Load < Demand), add min dist(Robot, Tap).
         """
         state = node.state
         taps_f, plants_f, robots_t = state
         taps = dict(taps_f)
         plants = dict(plants_f)
-        robots = [(rid, r, c, load, cap) for (rid, r, c, load, cap) in robots_t]
-
-        total_water_world = sum(taps.values())
-        if sum(plants.values()) == 0:
+        
+        # Basic stats
+        total_demand = sum(plants.values())
+        if total_demand == 0:
             return 0
+            
+        total_load = sum(load for (_, _, _, load, _) in robots_t)
+        max_cap = max((cap for (_, _, _, _, cap) in robots_t), default=1)
+        
+        # 1. Action Costs
+        # Pours needed
+        h_actions = total_demand
+        # Loads needed (if we don't have enough water)
+        needed_load = max(0, total_demand - total_load)
+        h_actions += needed_load
+        
+        # 2. Movement Costs (Relaxation)
+        # We calculate the minimal "distance units" the water must travel.
+        # For each unit of demand at a plant, it must come from somewhere.
+        # If we have loaded robots, they are sources. Taps are also sources.
+        # We take the optimistic view that any source can supply any plant.
+        
+        loaded_robot_positions = [(r, c) for (_, r, c, load, _) in robots_t if load > 0]
+        tap_positions = [pos for pos, amt in taps.items() if amt > 0]
+        
+        # If no water sources available at all (and we need water), return infinity
+        if not tap_positions and not loaded_robot_positions and total_demand > 0:
+             return 10**9
 
-        # occupied positions
-        occ = {(r, c) for (_, r, c, _, _) in robots_t}
-
-        h_sum = 0
+        transport_work = 0
         for ppos, pdemand in plants.items():
-            if pdemand <= 0:
-                continue
-            best_for_plant = float('inf')
-            for (rid, rr, rc, rload, rcap) in robots:
-                # effective capacity
-                eff_cap = min(rcap, max(1, total_water_world))
-                # required trips
-                trips = int(math.ceil(pdemand / float(eff_cap)))
+            if pdemand <= 0: continue
+            
+            # Distance from nearest tap
+            dist_tap = float('inf')
+            if tap_positions:
+                # Use cached tap_plant_dist if available, else direct lookup
+                dist_tap = min(self.tap_plant_dist.get((t, ppos), self.dist(t, ppos)) 
+                             for t in tap_positions)
+            
+            # Distance from nearest loaded robot
+            dist_robot = float('inf')
+            if loaded_robot_positions:
+                dist_robot = min(self.dist(r, ppos) for r in loaded_robot_positions)
+                
+            # Optimistic: take the better of the two sources
+            # (If we have load, we can use it. If not, we must use tap)
+            # But we can't use robot source if we don't have load...
+            # However, we are aggregating total work.
+            # If we have L units of load, we can save L * (dist_tap - dist_robot) work?
+            # Simpler admissible bound:
+            # Assume all current load is magically at the BEST position for the demands.
+            # Actually, just use dist_tap for ALL demand, because eventually water comes from taps.
+            # Unless it's already in a robot closer than the tap.
+            
+            cost_per_unit = dist_tap
+            if loaded_robot_positions:
+                cost_per_unit = min(cost_per_unit, dist_robot)
+                
+            if cost_per_unit == float('inf'):
+                return 10**9
+                
+            transport_work += cost_per_unit * pdemand
 
-                # find best tap (closest tap that still may have water). We accept any tap position.
-                # choose tap minimizing robot->tap + tap->plant (base trip cost)
-                best_tap = None
-                best_cost = float('inf')
-                for tpos, tamt in taps.items():
-                    if tamt <= 0:
-                        continue
-                    d_rt = self.dist((rr, rc), tpos)
-                    d_tp = self.tap_plant_dist.get((tpos, ppos), self.dist(tpos, ppos))
-                    total = d_rt + d_tp
-                    if total < best_cost:
-                        best_cost = total
-                        best_tap = tpos
-
-                # If no tap currently has water, check if this robot already carries
-                # enough water to satisfy the plant; in that case it can go directly.
-                if best_tap is None:
-                    if any(rload >= pdemand for (_, _, _, rload, _) in robots):
-                        # the robot with sufficient load will be handled below by using
-                        # d_rt = dist(robot, plant) and return_trip_cost = 0
-                        best_tap = None
-                    else:
-                        # no available tap and no robot currently carrying enough water
-                        # -> this plant cannot be satisfied from this state (conservative)
-                        return 10 ** 9
-
-                d_rt = self.dist((rr, rc), best_tap)
-                d_tp = self.dist(best_tap, ppos)
-                if d_rt == float('inf') or d_tp == float('inf'):
-                    continue
-
-                base_cost = d_rt + d_tp
-                return_trip_cost = (trips - 1) * 2 * d_tp if trips > 1 else 0
-                total_cost = base_cost + return_trip_cost
-
-                if total_cost < best_for_plant:
-                    best_for_plant = total_cost
-
-            if best_for_plant == float('inf'):
-                # unreachable plant -> very large lower bound
-                return 10 ** 9
-            h_sum += best_for_plant
-
-        # Finally, include minimal number of POUR actions (each unit needs 1 pour)
-        pours_remaining = sum(plants.values())
-        h_sum += pours_remaining
-
-        return int(h_sum)
+        # Divide by max capacity because one robot can carry multiple units
+        h_move = math.ceil(transport_work / max_cap)
+        
+        # 3. Fetch Cost
+        # If we don't have enough load, at least one robot must go to a tap.
+        if total_load < total_demand:
+            # Min dist from any robot to any tap
+            min_fetch = float('inf')
+            robot_positions = [(r, c) for (_, r, c, _, _) in robots_t]
+            if robot_positions and tap_positions:
+                # This can be optimized, but N is small
+                for rpos in robot_positions:
+                    for tpos in tap_positions:
+                        d = self.dist(rpos, tpos)
+                        if d < min_fetch:
+                            min_fetch = d
+            
+            if min_fetch != float('inf'):
+                h_move += min_fetch
+                
+        return int(h_actions + h_move)
 
     def h_gbfs(self, node):
         """Greedy heuristic: sum distance from nearest robot to plants plus demand"""
